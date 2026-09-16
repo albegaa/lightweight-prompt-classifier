@@ -44,10 +44,13 @@ P(Attack) > T_high
 
 최종적인 목적은 공격 탐지 성능을 유지하면서 상대적으로 비용이 큰 JailGuard의 호출량을 줄이는 것.
 
+### Router 동작 테스트
+
+![Router Test](docs/images/05_router_test.png)
+
 ---
 
 ## 2. 현재 구현 범위
-
 
 * KoELECTRA Binary Classification
 * Fine-tuning Pipeline
@@ -62,6 +65,14 @@ P(Attack) > T_high
 * Benign Block Rate
 * Validation probability 분석
 * Fine-tuned model 기반 inference
+
+### KoELECTRA Forward 테스트
+
+![KoELECTRA Forward](docs/images/02_koelectra_forward.png)
+
+### 학습 Step 테스트
+
+![Train Step](docs/images/03_train_step.png)
 
 ---
 
@@ -115,6 +126,10 @@ Transformers 4.46.3
 
 실제 데이터 기반 대규모 학습 및 실험은 추후 학과 GPU 서버에서 진행할 예정.
 
+### 패키지 및 환경 확인
+
+![Environment](docs/images/01_environment.png)
+
 ---
 
 ## 5. 설치
@@ -155,6 +170,10 @@ Validation
 
 Demo 데이터는 코드 및 학습 파이프라인 검증만을 위한 데이터이다.
 
+### 학습 및 Validation 결과
+
+![Training Pipeline](docs/images/06_training_pipeline.png)
+
 ---
 
 ## 7. Inference
@@ -179,6 +198,10 @@ P(Attack) > T_high
 → attack
 ```
 
+### 정상 / 공격 입력 테스트
+
+![Inference](docs/images/08_inference_benign_and_attack.png)
+
 ---
 
 ## 8. 평가 지표
@@ -193,10 +216,18 @@ Binary Classifier 평가:
 * FNR
 * TP / TN / FP / FN
 
+### 평가 지표 코드 테스트
+
+![Metrics Test](docs/images/04_metrics_test.png)
+
 Selective Router 평가:
 
 * JailGuard Call Rate
 * Attack Leakage Rate
 * Benign Block Rate
+
+### Threshold Sweep
+
+![Threshold Sweep](docs/images/07_fine_grained_threshold_sweep.png)
 
 추후 `T_low`, `T_high` 결정해야.
