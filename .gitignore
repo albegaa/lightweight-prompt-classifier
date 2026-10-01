@@ -30,3 +30,9 @@ Thumbs.db
 
 # Generated fine-tuned models
 results/**/model/
+
+# Smoke-test outputs
+results/smoke/
+
+# Fine-tuned best models
+results/**/best_model/
