@@ -1674,3 +1674,220 @@ A/B/C 구성요소를 연결하여 최종 pipeline을 구성한다.
 
 현재 Step 1 개발 단계에서는
 팀 통합 저장소를 아직 active source로 사용하지 않는다.
+
+---
+
+## 34.16 Step 1 본실험 전 최종 사전 점검
+
+실제 Step 1 데이터 수신 전에
+현재 학습·평가 pipeline이 본실험에 사용할 수 있는 상태인지
+추가 검증을 수행하였다.
+
+### 데이터 validator 재검증
+
+`validate_step1_data.py`에 대해 synthetic test를 다시 수행하였다.
+
+확인 결과:
+
+- 정상 데이터 → `VALIDATION PASSED`
+- augmented variant의 `changed=false` → 정상 rejection
+- train / test source-group leakage → 정상 rejection
+- `label=0.5` → 정상 rejection
+
+따라서 binary label 계약과
+원문 단위 leakage 검사가 의도대로 동작함을 확인하였다.
+
+### Augmented training input 준비 검증
+
+`prepare_augmented_train.py`에 대해
+두 입력 형태를 모두 검증하였다.
+
+지원 형태:
+
+1. variant-only
+2. original + variant combined
+
+두 입력 방식 모두 동일한 최종 학습 JSONL을 생성하는 것을 확인하였다.
+
+또한 pandas 결합 과정에서 variant metadata가
+
+    intensity = 0.7000000000000001
+    changed = 1.0
+    n_changed = 1.0
+
+과 같이 저장될 수 있는 문제를 확인하였다.
+
+이에 JSONL 저장 시 다음 타입을 보존하도록 수정하였다.
+
+- `intensity` → float
+- `changed` → boolean
+- `n_changed` → integer
+
+수정 후 두 입력 방식 모두
+
+    intensity = 0.7
+    changed = true
+    n_changed = 1
+
+형태로 동일하게 저장됨을 확인하였다.
+
+관련 commit:
+
+    5f26042 fix: preserve augmented metadata types
+
+### 난독화 평가 후처리 검증
+
+`analyze_obfuscated_eval.py`에 synthetic prediction을 입력하여
+다음 계산을 직접 검산하였다.
+
+- all rows metrics
+- changed-only metrics
+- application rate
+- technique별 metrics
+- technique × intensity별 metrics
+- TP / TN / FP / FN
+- Recall / F1 / FPR / FNR
+
+계산 결과가 기대값과 일치함을 확인하였다.
+
+난독화 성능의 주 결과는 계속해서
+
+    changed=true
+
+행을 기준으로 사용한다.
+
+### Main Step 1 결과표 검증
+
+`make_step1_table.py`에 대해
+4개 실험 조건의 synthetic 결과를 생성하여 검증하였다.
+
+대상:
+
+- KoELECTRA Original
+- KoELECTRA Augmented
+- mDeBERTa Original
+- mDeBERTa Augmented
+
+확인 항목:
+
+- Clean metrics
+- Obfuscated changed-only metrics
+- application rate
+- F1 difference
+- Recall difference
+
+모든 계산이 기대값과 일치하였다.
+
+단, Clean과 Obfuscated changed-only는
+완전히 동일한 표본의 paired 비교가 아니므로
+논문에서는 단순 인과적 성능 감소량으로 표현하지 않는다.
+
+### KoreanGuardrail summary 검증
+
+`make_step1_kg_summary.py`도
+synthetic KG 결과를 이용하여 검증하였다.
+
+확인 항목:
+
+- KG Clean
+- KG Obfuscated changed-only
+- application rate
+- F1 difference
+- Recall difference
+
+출력 결과가 기대값과 일치함을 확인하였다.
+
+### GPU model smoke test
+
+공용 GPU 서버의 NVIDIA Tesla P100-PCIE-16GB에서
+실제 모델 학습 step이 가능한지 확인하였다.
+
+KoELECTRA:
+
+    monologg/koelectra-base-v3-discriminator
+
+확인:
+
+- tokenizer load
+- model load
+- CUDA 이동
+- FP16 forward
+- loss 계산
+- backward
+- optimizer step
+
+결과:
+
+    KoELECTRA SMOKE TEST PASSED
+
+mDeBERTa:
+
+    microsoft/mdeberta-v3-base
+
+slow tokenizer를 사용하여 동일하게 검증하였다.
+
+확인:
+
+- tokenizer load
+- model load
+- CUDA 이동
+- FP16 forward
+- loss 계산
+- backward
+- optimizer step
+
+결과:
+
+    mDeBERTa SMOKE TEST PASSED
+
+두 모델 모두 본학습 실행이 가능한 상태임을 확인하였다.
+
+### 실행 환경 재현성 정리
+
+현재 본실험 기준 서버 환경:
+
+- Python 3.10.12
+- PyTorch 2.4.1+cu121
+- Transformers 4.51.3
+- scikit-learn 1.7.2
+- Pandas 2.3.3
+- NumPy 2.2.6
+- sentencepiece 0.2.2
+- protobuf 7.36.2
+- NVIDIA Tesla P100-PCIE-16GB
+
+환경 파일을 다음과 같이 분리하였다.
+
+- `requirements-common.txt`
+- `requirements-local.txt`
+- `requirements-server.txt`
+
+`requirements-server.txt`에 대해
+`pip install --dry-run` 및 `pip check`를 수행하였고
+현재 공용 GPU 환경과 충돌이 없음을 확인하였다.
+
+관련 commit:
+
+    84438ea docs: document reproducible Step 1 environments
+
+### 현재 상태
+
+본실험 전 코드 사전 점검은 완료하였다.
+
+현재 남은 주요 작업은 실제 최종 데이터를 수신한 뒤
+
+1. 전체 데이터 validator 실행
+2. 데이터 규모 및 label 분포 기록
+3. T9b 증강 조건 확인
+4. EPOCHS / BATCH_SIZE 확정
+5. KoELECTRA / mDeBERTa Original 학습
+6. KoELECTRA / mDeBERTa Augmented 학습
+7. Clean / Obfuscated 평가
+8. KoreanGuardrail 보조 평가
+9. Main / KG 결과 생성
+10. 실제 결과 검산 및 논문 반영
+
+순서로 진행하는 것이다.
+
+실제 연구 성능에 대한 결론은
+최종 데이터 기반 본실험 결과가 나온 뒤 작성한다.

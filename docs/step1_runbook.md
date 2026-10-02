@@ -130,6 +130,45 @@ Python 환경:
 
     export PYTHON=/root/project/.venv/bin/python
 
+공용 GPU 서버의 기준 Python 패키지는
+`requirements-server.txt`에 기록한다.
+
+새 환경을 구성하는 경우:
+
+    python -m venv /root/project/.venv
+    source /root/project/.venv/bin/activate
+    pip install -r requirements-server.txt
+
+이미 구성된 공용 환경을 사용하는 경우에는
+불필요하게 재설치하지 않고 다음을 확인한다.
+
+    "$PYTHON" -m pip check
+
+필요하면 설치된 핵심 버전도 확인한다.
+
+    "$PYTHON" - <<'PYENV'
+    import torch
+    import transformers
+    import sklearn
+    import pandas
+    import numpy
+
+    print("torch:", torch.__version__)
+    print("transformers:", transformers.__version__)
+    print("scikit-learn:", sklearn.__version__)
+    print("pandas:", pandas.__version__)
+    print("numpy:", numpy.__version__)
+    PYENV
+
+기준 서버 환경:
+
+- Python 3.10.12
+- PyTorch 2.4.1+cu121
+- Transformers 4.51.3
+- scikit-learn 1.7.2
+- Pandas 2.3.3
+- NumPy 2.2.6
+
 ---
 
 # 4. GPU 확인
@@ -816,6 +855,15 @@ Drop:
 
     percentage point
 
+단, Obfuscated 성능은 `changed=true` variant 집합 기준이므로
+이 값은 동일 샘플의 paired 전후 차이를 의미하지 않는다.
+
+논문에서는
+
+    Clean 대비 changed-only 난독화 평가셋에서 관찰된 성능 차이
+
+로 해석한다.
+
 ---
 
 # 25. KoreanGuardrail 보조 결과 생성
@@ -1069,25 +1117,26 @@ Step 1 본실험 실행 완료로 본다.
 # 34. 전체 실행 순서 요약
 
 1. 저장소 상태 확인
-2. GPU 확인
-3. 데이터 경로 변수 설정
-4. 전체 데이터 validator 실행
-5. 데이터 규모 / label 분포 확인
-6. T9b 증강 조건 확인
-7. EPOCHS / BATCH_SIZE 확정
-8. KoELECTRA Original 학습
-9. mDeBERTa Original 학습
-10. KoELECTRA Augmented 학습
-11. mDeBERTa Augmented 학습
-12. best model 4개 확인
-13. 네 학습 조건 × 네 평가 = 16회 실행
-14. Obfuscated 자동 changed-only 분석 확인
-15. `make_step1_table.py`
-16. `make_step1_kg_summary.py`
-17. Main / KG 결과 검산
-18. technique별 결과 필요 시 확인
-19. 실험 설정 및 결과 기록
-20. 논문 결과 작성
+2. Python / requirements 환경 확인
+3. GPU 확인
+4. 데이터 경로 변수 설정
+5. 전체 데이터 validator 실행
+6. 데이터 규모 / label 분포 확인
+7. T9b 증강 조건 확인
+8. EPOCHS / BATCH_SIZE 확정
+9. KoELECTRA Original 학습
+10. mDeBERTa Original 학습
+11. KoELECTRA Augmented 학습
+12. mDeBERTa Augmented 학습
+13. best model 4개 확인
+14. 네 학습 조건 × 네 평가 = 16회 실행
+15. Obfuscated 자동 changed-only 분석 확인
+16. `make_step1_table.py`
+17. `make_step1_kg_summary.py`
+18. Main / KG 결과 검산
+19. technique별 결과 필요 시 확인
+20. 실험 설정 및 결과 기록
+21. 논문 결과 작성
 
 ---
 
