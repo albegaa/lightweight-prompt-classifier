@@ -19,9 +19,6 @@
 
 구조로 연결하기 위한 prototype이다.
 
-최종 A+B+C 통합 pipeline은 Step 1 결과가 안정된 이후
-별도의 팀 공용 저장소에서 관리할 예정이다.
-
 ---
 
 ## 1. Step 1 목표
@@ -355,47 +352,3 @@ Step 1 실행 절차:
 
     docs/step1_runbook.md
 
----
-
-## 12. 저장소 역할
-
-### lightweight-prompt-classifier
-
-B 파트의 Step 1 경량 분류기 개발 및 실험 저장소.
-
-- classifier 개발
-- Original / Augmented 실험
-- robustness 평가
-- 초기 Router prototype
-- Step 1 개발 기록
-
-### B-screening
-
-B 파트에서 수행한 screening 및 연구 과정 기록 저장소.
-
-- T4 Reference Detector
-- T6 Detector Evasion
-- T9a Effective Attack
-- T9b 연결 기록
-- Step 1 결과 및 판단 근거 기록
-
-### 최종 팀 통합 저장소
-
-Step 1 결과가 안정된 이후 별도로 생성한다.
-
-A/B/C에서 검증된 최종 구성요소만 이관하여
-
-    Input
-      ↓
-    Lightweight Classifier
-      ↓
-    Router
-      ↓
-    JailGuard
-      ↓
-    Target LLM
-
-전체 pipeline을 통합하고 최종 평가한다.
-
-같은 active code를 여러 저장소에서 동시에 수정하지 않고,
-각 파트에서 검증된 특정 버전을 통합 저장소로 이관하는 것을 원칙으로 한다.
