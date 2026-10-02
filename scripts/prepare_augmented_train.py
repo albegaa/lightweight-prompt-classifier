@@ -221,6 +221,26 @@ def write_jsonl(df, path):
             for key, value in row.items():
                 if pd.isna(value):
                     clean[key] = None
+                    continue
+
+                if key == "changed":
+                    if isinstance(value, bool):
+                        clean[key] = value
+                    elif value in (0, 0.0, 1, 1.0):
+                        clean[key] = bool(value)
+                    else:
+                        raise ValueError(
+                            f"Invalid changed value: {value!r}"
+                        )
+                elif key == "n_changed":
+                    numeric = float(value)
+                    if not numeric.is_integer():
+                        raise ValueError(
+                            f"Invalid n_changed value: {value!r}"
+                        )
+                    clean[key] = int(numeric)
+                elif key == "intensity":
+                    clean[key] = round(float(value), 10)
                 else:
                     clean[key] = value
 
