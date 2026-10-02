@@ -2091,3 +2091,141 @@ B 파트에서는 최종 데이터 수신 후
 이 기준은
 `docs/step1_experiment_plan.md`와
 `docs/step1_runbook.md`에도 반영하였다.
+
+---
+
+## 34.18 원문 길이 상한 300자로 최종 조정
+
+34.17에서 원문 길이 상한을 500자로 검토하였으나,
+Step 1 classifier의 실제 입력 길이와
+번역·난독화 후 token 증가 가능성을 추가 검토한 결과
+영어 원문 기준 상한을 300자로 조정하였다.
+
+### 최종 결정
+
+본 연구의 메인 Step 1 데이터는
+
+    영어 원문 기준 300자 이하의
+    단일 짧은 프롬프트
+
+를 대상으로 한다.
+
+Step 1 classifier의
+
+    max_length = 128
+
+설정은 그대로 유지한다.
+
+300자 상한은 번역 전 영어 원문 선별 기준이며,
+번역된 최종 한국어 문장의 문자 수를
+다시 300자로 제한하는 규칙은 아니다.
+
+### 300자 상한 선택 근거
+
+원문 길이 상한별 공격 후보 규모:
+
+- 제한 없음: 4,068건
+- 1,000자 이하: 3,721건
+- 500자 이하: 3,616건
+- 300자 이하: 3,549건
+
+500자에서 300자로 줄일 때
+추가로 제외되는 공격은 67건으로,
+전체 공격 후보의 약 2% 수준이다.
+
+반면 번역 후 한국어 문장과
+난독화 variant의 token 수 증가를 고려하면
+500자 입력은 128 token을 초과할 가능성이 있어
+문장 뒤쪽의 공격 내용이 잘릴 위험이 있다.
+
+따라서 제한된 KSC 일정과
+공용 P100 GPU 환경을 고려하여
+`max_length`를 256으로 늘리는 대신
+원문 범위를 300자 이하로 제한하고
+`max_length=128`을 유지하기로 하였다.
+
+### 300자 이하 후보 규모
+
+Attack:
+
+- gandalf: 994건
+- xTRam1 attack: 2,555건
+- 합계: 3,549건
+
+Benign:
+
+- xTRam1 benign: 5,158건
+- hh-rlhf: 15,441건
+- KoAlpaca: 17,554건
+- prompts.chat: 240건
+- 합계: 38,393건
+
+따라서 300자 상한 적용 후에도
+목표 규모인 Attack 약 3,000건과
+Benign 약 3,000건을 구성할 수 있다.
+
+### tokenizer truncation 방향 확인
+
+본 서버 환경에서 실제 tokenizer 설정을 확인하였다.
+
+KoELECTRA:
+
+    tokenizer = ElectraTokenizerFast
+    truncation_side = right
+    model_max_length = 512
+
+mDeBERTa:
+
+    tokenizer = DebertaV2Tokenizer
+    truncation_side = right
+
+두 모델 모두 truncation 방향이 `right`임을 확인하였다.
+
+현재 학습 및 평가 코드에서는
+
+    truncation=True
+    max_length=128
+
+을 명시하므로,
+128 token을 넘는 입력은 뒤쪽이 잘린다.
+
+mDeBERTa tokenizer의 `model_max_length`에는
+매우 큰 sentinel 값이 표시되지만,
+본 실험에서는 명시적으로 지정한
+`max_length=128`을 실제 기준으로 사용한다.
+
+### 최종 데이터 수신 후 추가 확인
+
+문자 길이만으로 실제 token 길이를 정확히 알 수 없으므로
+최종 번역 데이터 수신 후
+KoELECTRA와 mDeBERTa tokenizer 각각에서
+128 token 초과 비율을 측정한다.
+
+확인 대상:
+
+- train
+- valid
+- test
+- kg_test
+- augmented train
+- obfuscated test
+- obfuscated KG test
+
+특히 난독화는 token 수를 증가시킬 수 있으므로
+원문과 난독화 데이터의 token 길이를 모두 확인한다.
+
+### 연구 범위의 한계
+
+300자 상한으로 인해 다음과 같은 공격은
+이번 Step 1의 직접적인 범위에서 제외될 수 있다.
+
+- 긴 DAN류 jailbreak
+- 장문 prompt
+- 긴 문서 내부에 삽입된 indirect injection
+
+따라서 논문에서는 본 연구의 범위를
+
+    단일 짧은 프롬프트 중심
+
+으로 명시하고,
+장문 문서 기반 공격은 향후 과제로 기록한다.

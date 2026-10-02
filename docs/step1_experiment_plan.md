@@ -219,9 +219,43 @@ shortcut으로 학습할 가능성을 줄이기 위함이다.
 
 - 원본 데이터셋이 제공하는 train / test split은 그대로 사용하지 않음
 - 전체 데이터를 합친 뒤 중복 및 label conflict를 제거
-- 원문 기준 최대 길이 500자 적용
+- 영어 원문 기준 300자 이하의 단일 짧은 프롬프트를 사용
 - 이후 우리 기준으로 train / valid / test를 다시 분할
 - 증강 전에 원문 단위로 split
+
+300자 상한은 번역 전 영어 원문을 선별하기 위한 기준이다.
+
+번역된 최종 한국어 `text`에
+다시 300자 상한을 적용한다는 의미는 아니다.
+
+Step 1 classifier의 입력 길이는
+
+    max_length = 128
+
+로 유지한다.
+
+300자 상한을 선택한 이유는
+번역과 난독화 이후 token 수 증가를 고려할 때
+문장 뒷부분이 128 token 이후 잘릴 가능성을 줄이기 위함이다.
+
+KoELECTRA와 mDeBERTa 모두 현재 tokenizer 설정에서
+
+    truncation_side = right
+
+임을 확인하였다.
+
+따라서 128 token을 초과하면
+입력의 뒤쪽이 잘린다.
+
+최종 데이터 수신 후에는
+문자 수만 확인하는 것이 아니라
+실제 KoELECTRA / mDeBERTa tokenizer를 이용하여
+128 token 초과 비율을 별도로 측정한다.
+
+장문의 DAN류 jailbreak 및
+긴 문서 내부에 삽입된 indirect injection은
+이번 Step 1의 직접적인 연구 범위에서 제외하며,
+연구의 한계 및 향후 과제로 기록한다.
 
 학습 / 검증 / 평가 분할:
 

@@ -316,16 +316,21 @@ variant source group:
 
 실제 데이터의 행 수, label, source 및 길이 분포를 확인한다.
 
-특히 메인 원본 데이터인
+원본 데이터 구성 단계에서는
+영어 원문 기준 300자 이하의 단일 짧은 프롬프트를 사용한다.
 
-- `train`
-- `valid`
-- `test`
+단, 이 300자 기준은 번역 전 영어 원문 선별 규칙이므로
+전달된 최종 한국어 `text`에
+300자 상한을 다시 적용하지 않는다.
 
-는 원문 기준 500자 상한이 적용되었는지 확인한다.
+B 파트에서는 데이터 카드에서
+원본 300자 상한 적용 여부를 확인하고,
+최종 전달된 데이터에 대해서는
+실제 tokenizer 기준 128 token 초과 비율을 측정한다.
 
-`kg_test`와 난독화 variant는
-동일한 500자 상한 검사의 직접 대상이 아니다.
+확인 대상에는 `kg_test`도 포함한다.
+난독화 데이터는 변형으로 인해 token 수가 증가할 수 있으므로
+별도로 token 길이 분포를 확인한다.
 
 실행:
 
@@ -398,23 +403,6 @@ variant source group:
                 },
             )
 
-            if name in {"train", "valid", "test"}:
-                over_500 = int(
-                    (lengths > 500).sum()
-                )
-
-                print(
-                    "text length > 500:",
-                    over_500,
-                )
-
-                if over_500 > 0:
-                    print(
-                        "WARNING:",
-                        "main clean dataset contains "
-                        "texts longer than 500 characters",
-                    )
-
         if "changed" in df.columns:
             print(
                 "changed:",
@@ -437,7 +425,9 @@ variant source group:
 - split별 Attack : Benign 비율
 - source별 데이터 규모
 - label과 source가 특정 조합에 과도하게 편중되지 않았는지
-- train / valid / test 원문의 500자 초과 여부
+- 데이터 카드의 영어 원문 300자 상한 적용 여부
+- 최종 한국어 text의 문자 길이 분포
+- 실제 tokenizer 기준 128 token 초과 건수 및 비율
 - augmented input의 variant 규모
 - 난독화 평가셋의 `changed` 분포
 - 난독화 technique 개수
@@ -447,6 +437,135 @@ variant source group:
 최종 데이터 카드의 길이 분포도 함께 확인한다.
 
 실제 수치는 실험 기록에 남긴다.
+
+### 실제 tokenizer 길이 확인
+
+문자 수는 실제 model token 수와 다르므로
+최종 데이터 수신 후 두 tokenizer에서
+128 token을 초과하는 비율을 확인한다.
+
+현재 확인된 truncation 방향:
+
+- KoELECTRA `ElectraTokenizerFast`: `right`
+- mDeBERTa `DebertaV2Tokenizer`: `right`
+
+학습 및 평가 코드에서는
+`max_length=128`, `truncation=True`를 사용하므로
+128 token 이후의 뒤쪽 입력은 잘린다.
+
+다음 코드는 최종 전달 파일의
+실제 token 길이를 truncation 없이 측정한다.
+
+    "$PYTHON" - <<PY
+    import pandas as pd
+    from transformers import AutoTokenizer
+
+    files = {
+        "train": "$TRAIN_FILE",
+        "valid": "$VALID_FILE",
+        "test": "$TEST_FILE",
+        "kg_test": "$KG_TEST_FILE",
+        "augmented_input": "$AUGMENTED_INPUT",
+        "obfuscated_test": "$OBFUSCATED_TEST_FILE",
+        "obfuscated_kg": "$OBFUSCATED_KG_FILE",
+    }
+
+    tokenizers = {
+        "koelectra": AutoTokenizer.from_pretrained(
+            "monologg/koelectra-base-v3-discriminator"
+        ),
+        "mdeberta": AutoTokenizer.from_pretrained(
+            "microsoft/mdeberta-v3-base",
+            use_fast=False,
+        ),
+    }
+
+    def load(path):
+        if path.endswith(".jsonl"):
+            return pd.read_json(path, lines=True)
+        return pd.read_csv(path)
+
+    def measure_lengths(tokenizer, texts, batch_size=256):
+        lengths = []
+
+        for start in range(0, len(texts), batch_size):
+            batch = texts[
+                start:start + batch_size
+            ]
+
+            encoded = tokenizer(
+                batch,
+                add_special_tokens=True,
+                truncation=False,
+                padding=False,
+                return_length=True,
+            )
+
+            lengths.extend(
+                encoded["length"]
+            )
+
+        return lengths
+
+    for file_name, file_path in files.items():
+        df = load(file_path)
+
+        texts = (
+            df["text"]
+            .astype(str)
+            .tolist()
+        )
+
+        print()
+        print("=====", file_name, "=====")
+
+        for tokenizer_name, tokenizer in tokenizers.items():
+            lengths = measure_lengths(
+                tokenizer,
+                texts,
+            )
+
+            total = len(lengths)
+            over_128 = sum(
+                length > 128
+                for length in lengths
+            )
+
+            ratio = (
+                over_128 / total
+                if total > 0
+                else 0.0
+            )
+
+            print(
+                tokenizer_name,
+                {
+                    "n": total,
+                    "median_tokens": float(
+                        pd.Series(lengths).median()
+                    ),
+                    "max_tokens": int(max(lengths))
+                    if lengths else 0,
+                    "over_128": int(over_128),
+                    "over_128_rate": round(
+                        ratio,
+                        4,
+                    ),
+                },
+            )
+    PY
+
+특히 다음을 기록한다.
+
+- train / valid / test의 128 token 초과 비율
+- `kg_test`의 128 token 초과 비율
+- augmented input의 128 token 초과 비율
+- 난독화 평가셋의 128 token 초과 비율
+- KoELECTRA와 mDeBERTa tokenizer 간 차이
+
+128 token 초과 비율이 예상보다 높으면
+바로 `max_length`를 변경하지 않고
+데이터 담당자와 실제 분포를 먼저 확인한다.
 
 ---
 
