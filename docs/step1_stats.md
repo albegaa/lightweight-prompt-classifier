@@ -48,7 +48,16 @@ python scripts/step1_stats.py \
     그래서 변형 여러 개가 한 원문을 이루는 평가에서는 원문(seed)을 표본 단위로 삼는다.
     Wilson 값은 비교용으로 `*_wilson_lo/hi` 열에만 남기고, 논문용 markdown 표에는 기본 구간만 표시한다.
   - 기법 분해·source별(난독화)·정상 문장 난독화 오탐률도 같은 규칙(난독화는 클러스터 부트스트랩)이다.
-    clean 쪽 값은 Wilson이다. `ci_method` 열에 어떤 방식인지 기록한다.
+    clean 쪽 값은 Wilson이다.
+- **0건 또는 전체 성공일 때 (부트스트랩 구간이 0폭이 되는 경우):**
+  Recall·FPR(난독화 평가)에서 성공이 0건이거나 전체이면 모든 재표본이 같은 값이 되어 구간이 `(100.0–100.0)`처럼
+  폭 0으로 나온다. 데이터가 한 값을 가리킬 뿐 불확실성이 0이라는 뜻이 아니므로, 이때는 부트스트랩 대신
+  **Wilson 95% 구간을 쓰되 n을 해당 label의 seed_id(클러스터) 수로 계산**한다(변형 행 수가 아니다). 같은 원문의 변형은
+  독립이 아니므로 표본 크기는 원문 수이다. `*_ci_method`에 `wilson_cluster_fallback`으로 기록하고, markdown 표에서는
+  값 뒤에 †를 붙인다. 원문→변형 유지율도 같은 규칙(n = 원문 수)을 쓴다.
+- **구간을 산출할 수 없는 경우:** F1·Precision, 그리고 Original vs Augmented 차이(Δ)에서 재표본 결과가 전부 같은
+  값이면(예: 두 조건 모두 전부 맞혀 차이가 항상 0, 분모가 0이라 항상 0) 구간을 만들지 않고 markdown에는
+  `산출 불가`, csv에는 빈 값과 `*_ci_method = not_computable`로 기록한다. `0.0–0.0`으로 쓰지 않는다.
 - **F1, Precision:** 모든 평가에서 `seed_id` 단위 클러스터 부트스트랩(반복 2000, 시드 고정, 백분위 95% 구간).
   clean은 클러스터가 1행이라 일반 부트스트랩과 같다.
 - **Original vs Augmented:** 같은 모델·같은 `eval_name`의 두 `predictions.csv`를 `id`로 결합하고,
@@ -65,6 +74,8 @@ python scripts/step1_stats.py \
 `technique_groups.csv`, `source_metrics.csv`, `benign_obfuscation_fpr.csv`,
 `step1_stats_tables.md`(논문용 표: % 소수 첫째 자리, 괄호에 기본 95% 구간만 표시), `run_info.json`(시드, 입력·예측 파일 sha256 등).
 csv의 `*_ci_lo/hi`가 기본 구간, `*_wilson_lo/hi`는 참고용 Wilson 구간이다.
+구간 방식은 지표별 열(`recall_ci_method`, `fpr_ci_method`, `f1_ci_method`, `precision_ci_method`; 차이·유지율·정상 오탐률은
+`ci_method`)에 `wilson` / `cluster_bootstrap` / `wilson_cluster_fallback` / `not_computable` 중 하나로 기록한다.
 
 ## 테스트
 

@@ -12,7 +12,10 @@ changed 정규화 규칙은 evaluate.py / analyze_obfuscated_eval.py와 같다.
      - clean 계열(원문 1문장 = 1행): Recall, FPR은 Wilson 95% 구간
      - obfuscated 계열(원문 1개 = 변형 여러 행): Recall, FPR도 seed_id 클러스터 부트스트랩이
        기본 구간이고 Wilson은 참고 열(*_wilson_*)로만 저장
+     - 성공이 0건이거나 전체이면 부트스트랩 구간이 0폭이 되므로 seed_id 수를 n으로 한 Wilson 구간으로
+       대체한다(ci_method = wilson_cluster_fallback, markdown 표에 †).
      - F1, Precision: seed_id 클러스터 부트스트랩 95% 구간
+     - 재표본 결과가 전부 같아 구간 폭이 0이면(F1·Precision·paired 차이) '산출 불가'(not_computable)
   2. Original vs Augmented (같은 모델, 같은 eval_name) paired 차이
      (Augmented - Original) - 같은 id로 결합, seed_id 클러스터 부트스트랩
   3. 원문 vs 변형 paired: 원문(clean, id)에서 맞힌 공격 중 변형(obfuscated, seed_id) 후에도
@@ -58,6 +61,12 @@ SUITES = (
 )
 
 WILSON_Z = 1.96
+
+# 구간 산출 방식 (csv의 *ci_method 열)
+METHOD_WILSON = "wilson"
+METHOD_BOOTSTRAP = "cluster_bootstrap"
+METHOD_FALLBACK = "wilson_cluster_fallback"
+METHOD_NA = "not_computable"
 
 PRINT_LIMIT = 20
 
@@ -253,6 +262,29 @@ def percentile_interval(samples):
     return lo, hi
 
 
+def bootstrap_ci(samples):
+    """
+    부트스트랩 표본 (n_boot, q)에서 열별 95% 백분위 구간과 산출 방식.
+    표본이 전부 같은 값(폭 0)이거나 nan이면 구간을 만들지 않고 not_computable로 표시한다.
+    반환: lo (q,), hi (q,), methods (길이 q 목록)
+    """
+    lo = np.percentile(samples, 2.5, axis=0).astype(float)
+    hi = np.percentile(samples, 97.5, axis=0).astype(float)
+
+    methods = []
+
+    for j in range(samples.shape[1]):
+        col = samples[:, j]
+
+        if np.isnan(col).any() or np.ptp(col) == 0:
+            lo[j], hi[j] = float("nan"), float("nan")
+            methods.append(METHOD_NA)
+        else:
+            methods.append(METHOD_BOOTSTRAP)
+
+    return lo, hi, methods
+
+
 def counts_by_cluster(df):
     """seed_id별 [tp, fp, fn, tn] 배열 (seed_id 정렬)."""
     work = pd.DataFrame({
@@ -270,7 +302,7 @@ def counts_by_cluster(df):
 
 def ci_method_for(kind):
     """clean 계열(원문 1문장 = 1행)은 Wilson, obfuscated 계열(원문 1개 = 변형 여러 행)은 클러스터 부트스트랩."""
-    return "wilson" if kind == "clean" else "cluster_bootstrap"
+    return METHOD_WILSON if kind == "clean" else METHOD_BOOTSTRAP
 
 
 def rate_counts_by_cluster(df, label):
@@ -293,31 +325,52 @@ def stats_rate(sums):
     return safe_ratio(sums[:, 0], sums[:, 1])[:, None]
 
 
+def proportion_interval(hits, n, n_clusters, samples_fn):
+    """
+    비율의 95% 구간. 성공이 0건이거나 전체(hits == n)이면 클러스터 부트스트랩 표본이 전부 같아져
+    구간 폭이 0이 되므로, 클러스터(seed_id) 수를 n으로 한 Wilson 구간을 대신 쓴다.
+    반환: (lo, hi, method)
+    """
+    if n_clusters == 0:
+        return (float("nan"), float("nan"), METHOD_NA)
+
+    if hits == 0 or hits == n:
+        lo, hi = wilson_interval(n_clusters if hits == n else 0, n_clusters)
+
+        return (lo, hi, METHOD_FALLBACK)
+
+    lo, hi, methods = bootstrap_ci(samples_fn())
+
+    return (float(lo[0]), float(hi[0]), methods[0])
+
+
 def rate_interval(df, label, method, args, key):
     """
-    label 행 중 예측 1의 비율(Recall 또는 FPR)의 95% 구간.
+    label 행 중 예측 1의 비율(Recall 또는 FPR)의 95% 구간 (lo, hi, method).
     method='wilson'은 행을 독립으로 보고, 'cluster_bootstrap'은 seed_id를 클러스터로 재표본한다.
+    클러스터 부트스트랩에서 성공이 0건이거나 전체이면 Wilson(n = 클러스터 수)으로 대체한다.
     """
     part = df.loc[df["label"] == label]
 
-    if method == "wilson":
-        return wilson_interval(int((part["prediction"] == 1).sum()), len(part))
+    if method == METHOD_WILSON:
+        lo, hi = wilson_interval(int((part["prediction"] == 1).sum()), len(part))
+
+        return (lo, hi, METHOD_WILSON)
 
     arr = rate_counts_by_cluster(df, label)
 
-    if len(arr) == 0:
-        return (float("nan"), float("nan"))
+    hits = int(arr[:, 0].sum()) if len(arr) else 0
+    n = int(arr[:, 1].sum()) if len(arr) else 0
 
-    samples = cluster_bootstrap(
-        [arr],
-        stats_rate,
-        args.n_boot,
-        make_rng(args.seed, f"rate|{label}|{key}"),
-    )
+    def samples_fn():
+        return cluster_bootstrap(
+            [arr],
+            stats_rate,
+            args.n_boot,
+            make_rng(args.seed, f"rate|{label}|{key}"),
+        )
 
-    lo, hi = percentile_interval(samples)
-
-    return (float(lo[0]), float(hi[0]))
+    return proportion_interval(hits, n, len(arr), samples_fn)
 
 
 def rate_block(df, method, args, key):
@@ -337,11 +390,12 @@ def rate_block(df, method, args, key):
     fpr_w = wilson_interval(fp, n_benign)
 
     return {
-        "ci_method": method,
+        "recall_ci_method": rec_ci[2],
         "recall_ci_lo": rec_ci[0],
         "recall_ci_hi": rec_ci[1],
         "recall_wilson_lo": rec_w[0],
         "recall_wilson_hi": rec_w[1],
+        "fpr_ci_method": fpr_ci[2],
         "fpr_ci_lo": fpr_ci[0],
         "fpr_ci_hi": fpr_ci[1],
         "fpr_wilson_lo": fpr_w[0],
@@ -761,7 +815,7 @@ def analyze_conditions(conditions, args):
             make_rng(args.seed, key),
         )
 
-        lo, hi = percentile_interval(samples)
+        lo, hi, methods = bootstrap_ci(samples)
 
         row = {
             "suite": suite,
@@ -780,9 +834,11 @@ def analyze_conditions(conditions, args):
             "recall": point["recall"],
             "fpr": point["fpr"],
             "f1": point["f1"],
+            "f1_ci_method": methods[2],
             "f1_boot_lo": lo[2],
             "f1_boot_hi": hi[2],
             "precision": point["precision"],
+            "precision_ci_method": methods[3],
             "precision_boot_lo": lo[3],
             "precision_boot_hi": hi[3],
         }
@@ -837,7 +893,8 @@ def analyze_original_vs_augmented(conditions, args):
                     make_rng(args.seed, f"delta|{suite}|{model}|{kind}"),
                 )
 
-                lo, hi = percentile_interval(samples)
+                # 두 조건의 결과가 모두 한쪽으로 같아 차이가 재표본마다 같은 값이면 구간을 만들지 않는다
+                lo, hi, methods = bootstrap_ci(samples)
 
                 for i, metric in enumerate(("recall", "fpr", "f1")):
                     rows.append({
@@ -851,6 +908,7 @@ def analyze_original_vs_augmented(conditions, args):
                         "original": pm_base[metric],
                         "augmented": pm_other[metric],
                         "delta_aug_minus_orig": pm_other[metric] - pm_base[metric],
+                        "ci_method": methods[i],
                         "delta_boot_lo": lo[i],
                         "delta_boot_hi": hi[i],
                     })
@@ -910,14 +968,21 @@ def analyze_original_vs_variant(conditions, args):
                 def stat_ratio(sums):
                     return safe_ratio(sums[:, 1], sums[:, 0])[:, None]
 
-                samples = cluster_bootstrap(
-                    [per_seed[["den", "kept"]].to_numpy(dtype=np.int64)],
-                    stat_ratio,
-                    args.n_boot,
-                    make_rng(args.seed, f"retain|{suite}|{model}|{training}"),
-                )
+                def samples_fn():
+                    return cluster_bootstrap(
+                        [per_seed[["den", "kept"]].to_numpy(dtype=np.int64)],
+                        stat_ratio,
+                        args.n_boot,
+                        make_rng(args.seed, f"retain|{suite}|{model}|{training}"),
+                    )
 
-                ci = percentile_interval(samples)
+                # 유지가 0건이거나 전체이면 Recall·FPR과 같은 규칙(seed 수 기준 Wilson)을 쓴다
+                ci = proportion_interval(
+                    n_kept,
+                    n_den,
+                    int((per_seed["den"] > 0).sum()),
+                    samples_fn,
+                )
 
                 rows.append({
                     "suite": suite,
@@ -928,8 +993,9 @@ def analyze_original_vs_variant(conditions, args):
                     "n_variants_orig_correct": n_den,
                     "n_kept": n_kept,
                     "retention_rate": rate,
-                    "retention_boot_lo": float(ci[0][0]),
-                    "retention_boot_hi": float(ci[1][0]),
+                    "ci_method": ci[2],
+                    "retention_boot_lo": ci[0],
+                    "retention_boot_hi": ci[1],
                     "n_flipped_to_wrong": n_den - n_kept,
                 })
 
@@ -990,7 +1056,7 @@ def analyze_technique_groups(conditions, args, train_pairs):
 
                     block = rate_block(
                         part,
-                        "cluster_bootstrap",
+                        METHOD_BOOTSTRAP,
                         args,
                         f"grp|{suite}|{model}|{training}|{group}",
                     )
@@ -1084,7 +1150,7 @@ def analyze_benign_obfuscation(conditions, args):
                     ci = rate_interval(
                         part,
                         0,
-                        "cluster_bootstrap",
+                        METHOD_BOOTSTRAP,
                         args,
                         f"benign|{suite}|{model}|{training}|{scope}",
                     )
@@ -1100,7 +1166,7 @@ def analyze_benign_obfuscation(conditions, args):
                         "n_seeds": int(part["seed_id"].nunique()),
                         "false_positives": fp,
                         "fpr": fp / n if n > 0 else float("nan"),
-                        "ci_method": "cluster_bootstrap",
+                        "ci_method": ci[2],
                         "fpr_ci_lo": ci[0],
                         "fpr_ci_hi": ci[1],
                         "fpr_wilson_lo": wilson[0],
@@ -1132,8 +1198,12 @@ def pct_signed(value):
     return f"{float(value) * 100:+.1f}"
 
 
-def with_ci(value, lo, hi, signed=False):
+def with_ci(value, lo, hi, signed=False, method=None):
+    """값 (구간). fallback 구간에는 †, 구간을 산출할 수 없으면 '산출 불가'."""
     fmt = pct_signed if signed else pct
+
+    if method == METHOD_NA:
+        return f"{fmt(value)} (산출 불가)"
 
     if pd.isna(lo) or pd.isna(hi):
         return f"{fmt(value)} (–)"
@@ -1141,7 +1211,12 @@ def with_ci(value, lo, hi, signed=False):
     # 차이(signed)는 음수가 있으므로 구간을 쉼표로 구분
     sep = ", " if signed else "–"
 
-    return f"{fmt(value)} ({pct_signed(lo) if signed else pct(lo)}{sep}{pct_signed(hi) if signed else pct(hi)})"
+    text = f"{fmt(value)} ({pct_signed(lo) if signed else pct(lo)}{sep}{pct_signed(hi) if signed else pct(hi)})"
+
+    if method == METHOD_FALLBACK:
+        text += "†"
+
+    return text
 
 
 def md_table(headers, rows):
@@ -1168,7 +1243,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
         "값은 %, 소수 첫째 자리. 괄호는 95% 구간. "
         "구간: clean 계열의 Recall·FPR은 Wilson(원문 1문장 = 1행), "
         "obfuscated 계열의 Recall·FPR과 모든 F1·Precision은 seed_id 클러스터 부트스트랩"
-        f"(반복 {args.n_boot}, 시드 {args.seed}). 난독화 평가는 changed=true 행 기준."
+        f"(반복 {args.n_boot}, 시드 {args.seed}). 난독화 평가는 changed=true 행 기준. "
+        "† 0건 또는 전체 성공으로 부트스트랩 구간을 산출할 수 없어 원문 수 기준 Wilson 구간 사용. "
+        "'산출 불가'는 재표본 결과가 모두 같은 값이라 구간 폭이 0이 되는 경우."
     )
 
     for suite, clean_name, obf_name in active_suites(args):
@@ -1188,10 +1265,10 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                     model,
                     training,
                     int(r["n"]),
-                    with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
-                    with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
-                    with_ci(r["f1"], r["f1_boot_lo"], r["f1_boot_hi"]),
-                    with_ci(r["precision"], r["precision_boot_lo"], r["precision_boot_hi"]),
+                    with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"], method=r["recall_ci_method"]),
+                    with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"], method=r["fpr_ci_method"]),
+                    with_ci(r["f1"], r["f1_boot_lo"], r["f1_boot_hi"], method=r["f1_ci_method"]),
+                    with_ci(r["precision"], r["precision_boot_lo"], r["precision_boot_hi"], method=r["precision_ci_method"]),
                 ])
 
             parts.append(f"### {title}")
@@ -1212,9 +1289,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                     MODELS.get(model, model),
                     eval_name,
                     int(part["n"].iloc[0]),
-                    with_ci(cells["recall"]["delta_aug_minus_orig"], cells["recall"]["delta_boot_lo"], cells["recall"]["delta_boot_hi"], signed=True),
-                    with_ci(cells["fpr"]["delta_aug_minus_orig"], cells["fpr"]["delta_boot_lo"], cells["fpr"]["delta_boot_hi"], signed=True),
-                    with_ci(cells["f1"]["delta_aug_minus_orig"], cells["f1"]["delta_boot_lo"], cells["f1"]["delta_boot_hi"], signed=True),
+                    with_ci(cells["recall"]["delta_aug_minus_orig"], cells["recall"]["delta_boot_lo"], cells["recall"]["delta_boot_hi"], signed=True, method=cells["recall"]["ci_method"]),
+                    with_ci(cells["fpr"]["delta_aug_minus_orig"], cells["fpr"]["delta_boot_lo"], cells["fpr"]["delta_boot_hi"], signed=True, method=cells["fpr"]["ci_method"]),
+                    with_ci(cells["f1"]["delta_aug_minus_orig"], cells["f1"]["delta_boot_lo"], cells["f1"]["delta_boot_hi"], signed=True, method=cells["f1"]["ci_method"]),
                 ])
 
             parts.append("### Augmented − Original (%p, paired 부트스트랩)")
@@ -1236,7 +1313,7 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 int(r["n_seeds"]),
                 int(r["n_variants_orig_correct"]),
                 int(r["n_kept"]),
-                with_ci(r["retention_rate"], r["retention_boot_lo"], r["retention_boot_hi"]),
+                with_ci(r["retention_rate"], r["retention_boot_lo"], r["retention_boot_hi"], method=r["ci_method"]),
             ])
 
         parts.append("### 원문에서 맞힌 공격 중 변형 후에도 맞힌 비율")
@@ -1257,9 +1334,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 training,
                 r["group"],
                 int(r["n_attack"]),
-                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
+                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"], method=r["recall_ci_method"]),
                 int(r["n_benign"]),
-                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"], method=r["fpr_ci_method"]),
             ])
 
         trained = ", ".join(f"{n}:{i}" for n, i in train_pairs)
@@ -1283,9 +1360,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 r["eval_name"],
                 r["source"],
                 int(r["n_attack"]),
-                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
+                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"], method=r["recall_ci_method"]),
                 int(r["n_benign"]),
-                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"], method=r["fpr_ci_method"]),
             ])
 
         parts.append("### source별 Recall / FPR")
@@ -1308,7 +1385,7 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 with_ci(r["clean_fpr"], r["clean_fpr_ci_lo"], r["clean_fpr_ci_hi"]),
                 int(r["n_benign_changed"]),
                 int(r["false_positives"]),
-                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"], method=r["ci_method"]),
             ])
 
         parts.append("### 정상 문장의 난독화 오탐률 (label 0 & changed=true)")

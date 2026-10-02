@@ -246,8 +246,10 @@ def test_rate_interval_clustered_is_wider_when_variants_are_correlated():
         n_boot = 2000
         seed = 1
 
-    w_lo, w_hi = stats.rate_interval(df, 1, "wilson", A, "k")
-    b_lo, b_hi = stats.rate_interval(df, 1, "cluster_bootstrap", A, "k")
+    w_lo, w_hi, _ = stats.rate_interval(df, 1, "wilson", A, "k")
+    b_lo, b_hi, b_method = stats.rate_interval(df, 1, "cluster_bootstrap", A, "k")
+
+    assert b_method == "cluster_bootstrap"
 
     assert (b_hi - b_lo) > 2 * (w_hi - w_lo), (b_lo, b_hi, w_lo, w_hi)
     assert b_lo < 0.6 < b_hi
@@ -259,15 +261,234 @@ def test_rate_interval_clustered_is_wider_when_variants_are_correlated():
         "prediction": [1] * 320 + [0] * 80,
     })
 
-    s_lo, s_hi = stats.rate_interval(single, 1, "wilson", A, "k")
-    c_lo, c_hi = stats.rate_interval(single, 1, "cluster_bootstrap", A, "k")
+    s_lo, s_hi, _ = stats.rate_interval(single, 1, "wilson", A, "k")
+    c_lo, c_hi, _ = stats.rate_interval(single, 1, "cluster_bootstrap", A, "k")
 
     assert abs(s_lo - c_lo) < 0.02 and abs(s_hi - c_hi) < 0.02
 
     # 해당 label 행이 없으면 nan
-    none_lo, none_hi = stats.rate_interval(single, 0, "cluster_bootstrap", A, "k")
+    none_lo, none_hi, none_method = stats.rate_interval(single, 0, "cluster_bootstrap", A, "k")
 
-    assert np.isnan(none_lo) and np.isnan(none_hi)
+    assert np.isnan(none_lo) and np.isnan(none_hi) and none_method == "not_computable"
+
+
+def test_rate_interval_falls_back_to_wilson_on_seed_count_when_all_or_none():
+    class A:
+        n_boot = 500
+        seed = 1
+
+    z2 = stats.WILSON_Z ** 2
+
+    # 공격 30개 seed x 변형 5개가 전부 맞음 -> 행 150개가 아니라 seed 30개 기준 Wilson
+    rows = [{"seed_id": f"a{i}", "label": 1, "prediction": 1} for i in range(30) for _ in range(5)]
+    df = pd.DataFrame(rows)
+
+    lo, hi, method = stats.rate_interval(df, 1, "cluster_bootstrap", A, "k")
+
+    assert method == "wilson_cluster_fallback"
+
+    w_lo, w_hi = stats.wilson_interval(30, 30)
+
+    assert (lo, hi) == (w_lo, w_hi)
+    assert abs(lo - 30 / (30 + z2)) < 1e-9 and hi == 1.0
+
+    row_lo, _ = stats.wilson_interval(150, 150)
+
+    assert lo < row_lo  # 행 수 기준 Wilson보다 넓다
+
+    # 정상 25개 seed x 변형 4개가 전부 정상 판정 -> 오탐 0건, seed 25개 기준
+    rows = [{"seed_id": f"b{i}", "label": 0, "prediction": 0} for i in range(25) for _ in range(4)]
+    df = pd.DataFrame(rows)
+
+    lo, hi, method = stats.rate_interval(df, 0, "cluster_bootstrap", A, "k")
+
+    assert method == "wilson_cluster_fallback"
+    assert (lo, hi) == stats.wilson_interval(0, 25)
+    assert lo == 0.0 and abs(hi - z2 / (25 + z2)) < 1e-9
+
+    # clean 계열(wilson)은 그대로 Wilson, 일부만 맞으면 부트스트랩
+    lo, hi, method = stats.rate_interval(pd.DataFrame(rows), 0, "wilson", A, "k")
+
+    assert method == "wilson" and (lo, hi) == stats.wilson_interval(0, 100)
+
+    mixed = pd.DataFrame([{"seed_id": f"c{i}", "label": 1, "prediction": int(i % 3 != 0)} for i in range(30) for _ in range(2)])
+
+    assert stats.rate_interval(mixed, 1, "cluster_bootstrap", A, "k")[2] == "cluster_bootstrap"
+
+
+def test_bootstrap_ci_marks_zero_width_as_not_computable():
+    samples = np.column_stack([
+        np.full(200, 1.0),                                   # 항상 1.0 (예: 전부 맞힌 F1)
+        np.linspace(0.2, 0.8, 200),                          # 정상
+        np.zeros(200),                                       # 항상 0 (예: 분모 0)
+        np.where(np.arange(200) % 2 == 0, np.nan, 0.5),      # nan 포함
+    ])
+
+    lo, hi, methods = stats.bootstrap_ci(samples)
+
+    assert methods == ["not_computable", "cluster_bootstrap", "not_computable", "not_computable"]
+    assert np.isnan(lo[0]) and np.isnan(hi[0]) and np.isnan(lo[2]) and np.isnan(lo[3])
+    assert 0.2 < lo[1] < hi[1] < 0.8
+
+    # F1/Precision: 정상만 있고 전부 정상 판정이면(분모 0) 재표본마다 0 -> 산출 불가
+    df = pd.DataFrame({"seed_id": [f"s{i}" for i in range(20)], "label": 0, "prediction": 0})
+
+    sums = stats.cluster_bootstrap([stats.counts_by_cluster(df).to_numpy()], stats.stats_single, 100, stats.make_rng(1, "x"))
+
+    assert stats.bootstrap_ci(sums)[2] == ["not_computable", "not_computable", "not_computable", "not_computable"]
+
+
+def test_with_ci_marks_fallback_and_not_computable():
+    assert stats.with_ci(1.0, 0.887, 1.0, method="wilson_cluster_fallback") == "100.0 (88.7–100.0)†"
+    assert stats.with_ci(1.0, 0.887, 1.0, method="cluster_bootstrap") == "100.0 (88.7–100.0)"
+    assert stats.with_ci(0.0, float("nan"), float("nan"), signed=True, method="not_computable") == "+0.0 (산출 불가)"
+    assert stats.with_ci(0.5, float("nan"), float("nan")) == "50.0 (–)"
+
+
+def write_degenerate_results(root):
+    """
+    torch 없이 만드는 퇴화 사례.
+    koelectra: Original / Augmented 모두 전부 맞힘(Recall 100%, FPR 0%) -> 구간 fallback, 차이는 항상 0.
+    mdeberta: 무작위 예측(퇴화 없음) -> 부트스트랩, 차이 구간 산출.
+    """
+    rng = np.random.default_rng(5)
+
+    seeds = [
+        {"id": f"d_{i:03d}", "text": f"문장 {i}", "label": int(i % 2 == 0), "source": "src_a" if i < 30 else "src_b"}
+        for i in range(60)
+    ]
+
+    obf = []
+
+    for sd in seeds:
+        for j in range(3):
+            obf.append({
+                "id": f"{sd['id']}__v{j}", "text": f"{sd['text']} 변형{j}", "label": sd["label"], "source": sd["source"],
+                "seed_id": sd["id"], "technique": ["yamin_swap", "symbol_insert", "chosung"][j],
+                "intensity": 0.7 if j == 0 else 0.3, "changed": True, "n_changed": 1,
+            })
+
+    data = root / "data"
+    data.mkdir(parents=True)
+
+    write_jsonl(data / "test.jsonl", seeds)
+    write_jsonl(data / "obfuscated_test.jsonl", obf)
+
+    for model in MODEL_KEYS:
+        for training in TRAININGS:
+            for name, rows in (("clean", seeds), ("obfuscated", obf)):
+                df = pd.DataFrame(rows)
+
+                if model == "koelectra":
+                    df["prediction"] = df["label"]
+                else:
+                    df["prediction"] = rng.integers(0, 2, size=len(df))
+
+                df["attack_score"] = df["prediction"].astype(float)
+
+                out = root / "results" / "step1" / model / training / "eval" / name
+                out.mkdir(parents=True)
+
+                df.to_csv(out / "predictions.csv", index=False)
+
+    return data
+
+
+def test_degenerate_cases_end_to_end():
+    root = Path(tempfile.mkdtemp(prefix="step1_stats_degenerate_"))
+    atexit.register(shutil.rmtree, root, ignore_errors=True)
+
+    data = write_degenerate_results(root)
+    out_dir = root / "stats"
+
+    proc = subprocess.run(
+        [
+            sys.executable, str(REPO / "scripts" / "step1_stats.py"),
+            "--results-root", str(root / "results" / "step1"),
+            "--clean-input", str(data / "test.jsonl"),
+            "--obfuscated-input", str(data / "obfuscated_test.jsonl"),
+            "--n-boot", "300",
+            "--output-dir", str(out_dir),
+        ],
+        capture_output=True, text=True, cwd=str(REPO),
+    )
+
+    assert proc.returncode == 0, proc.stderr + proc.stdout
+
+    z2 = stats.WILSON_Z ** 2
+    cond = pd.read_csv(out_dir / "condition_metrics.csv")
+
+    ko = cond.loc[(cond["model"] == "koelectra") & (cond["scope"] == "changed_only")]
+
+    assert len(ko) == 2
+
+    for _, row in ko.iterrows():
+        # 전부 맞힘: Recall 100%, FPR 0% -> 공격·정상 seed 30개씩 기준 Wilson
+        assert row["recall_ci_method"] == row["fpr_ci_method"] == "wilson_cluster_fallback"
+        assert np.allclose([row["recall_ci_lo"], row["recall_ci_hi"]], stats.wilson_interval(30, 30), atol=1e-6)
+        assert np.allclose([row["fpr_ci_lo"], row["fpr_ci_hi"]], stats.wilson_interval(0, 30), atol=1e-6)
+        assert abs(row["recall_ci_lo"] - 30 / (30 + z2)) < 1e-6
+        assert abs(row["fpr_ci_hi"] - z2 / (30 + z2)) < 1e-6
+
+        # F1/Precision도 재표본마다 1.0이라 구간 폭 0 -> 산출 불가
+        assert row["f1_ci_method"] == row["precision_ci_method"] == "not_computable"
+        assert np.isnan(row["f1_boot_lo"]) and np.isnan(row["precision_boot_hi"])
+
+    # clean 계열은 Wilson 그대로 (행 30/30)
+    ko_clean = cond.loc[(cond["model"] == "koelectra") & (cond["scope"] == "clean_all_rows")]
+
+    assert (ko_clean["recall_ci_method"] == "wilson").all()
+    assert (ko_clean["recall_ci_lo"] == ko_clean["recall_wilson_lo"]).all()
+
+    # mDeBERTa(무작위)는 부트스트랩 구간이 정상 산출
+    md_obf = cond.loc[(cond["model"] == "mdeberta") & (cond["scope"] == "changed_only")]
+
+    assert (md_obf["recall_ci_method"] == "cluster_bootstrap").all()
+    assert (md_obf["f1_ci_method"] == "cluster_bootstrap").all()
+    assert (md_obf["recall_ci_hi"] > md_obf["recall_ci_lo"]).all()
+
+    # paired 차이: koelectra는 두 조건 모두 전부 맞힘이라 항상 0 -> 산출 불가, mdeberta는 구간 산출
+    delta = pd.read_csv(out_dir / "paired_original_vs_augmented.csv")
+
+    ko_delta = delta.loc[delta["model"] == "koelectra"]
+
+    assert (ko_delta["ci_method"] == "not_computable").all()
+    assert ko_delta["delta_boot_lo"].isna().all() and ko_delta["delta_boot_hi"].isna().all()
+    assert (ko_delta["delta_aug_minus_orig"] == 0).all()
+
+    md_delta = delta.loc[delta["model"] == "mdeberta"]
+
+    assert (md_delta["ci_method"] == "cluster_bootstrap").all()
+    assert (md_delta["delta_boot_hi"] >= md_delta["delta_boot_lo"]).all()
+
+    # 원문 -> 변형 유지율: 전부 유지 -> seed 30개 기준 Wilson
+    retain = pd.read_csv(out_dir / "paired_original_vs_variant.csv")
+    ko_retain = retain.loc[retain["model"] == "koelectra"]
+
+    assert (ko_retain["ci_method"] == "wilson_cluster_fallback").all()
+    assert ((ko_retain["retention_boot_lo"] - 30 / (30 + z2)).abs() < 1e-6).all()
+
+    # 정상 문장 난독화 오탐률: koelectra는 오탐 0건 -> fallback
+    benign = pd.read_csv(out_dir / "benign_obfuscation_fpr.csv")
+    ko_overall = benign.loc[(benign["model"] == "koelectra") & (benign["scope"] == "overall")]
+
+    assert (ko_overall["false_positives"] == 0).all()
+    assert (ko_overall["ci_method"] == "wilson_cluster_fallback").all()
+    assert (ko_overall["fpr_ci_lo"] == 0.0).all()
+
+    # markdown: fallback에는 †, 산출 불가 표기, 머리말 설명
+    md = (out_dir / "step1_stats_tables.md").read_text(encoding="utf-8")
+
+    assert "† 0건 또는 전체 성공으로 부트스트랩 구간을 산출할 수 없어 원문 수 기준 Wilson 구간 사용" in md
+    assert "(88.6–100.0)†" in md  # Wilson(30, 30) 하한
+    assert "(0.0–11.4)†" in md  # Wilson(0, 30) 상한
+    assert "(산출 불가)" in md
+    assert "0.0–0.0" not in md and "100.0–100.0" not in md
+
+    # mDeBERTa 줄에는 † 가 없다
+    for line in md.splitlines():
+        if line.startswith("| mDeBERTa") and "obfuscated" not in line:
+            assert "†" not in line, line
 
 
 def test_technique_group_assignment():
@@ -597,13 +818,13 @@ def test_end_to_end_point_estimates_match_existing_results_and_sklearn():
 
         # 기본 구간: clean은 Wilson, obfuscated는 클러스터 부트스트랩 (Wilson은 참고 열)
         if row["scope"] == "clean_all_rows":
-            assert row["ci_method"] == "wilson"
+            assert row["recall_ci_method"] == row["fpr_ci_method"] == "wilson"
             assert row["recall_ci_lo"] == row["recall_wilson_lo"] and row["recall_ci_hi"] == row["recall_wilson_hi"]
             assert row["fpr_ci_lo"] == row["fpr_wilson_lo"] and row["fpr_ci_hi"] == row["fpr_wilson_hi"]
         else:
-            assert row["ci_method"] == "cluster_bootstrap"
-
             for metric in ("recall", "fpr"):
+                assert row[f"{metric}_ci_method"] in ("cluster_bootstrap", "wilson_cluster_fallback")
+
                 lo, hi = row[f"{metric}_ci_lo"], row[f"{metric}_ci_hi"]
 
                 assert lo <= hi
@@ -611,6 +832,9 @@ def test_end_to_end_point_estimates_match_existing_results_and_sklearn():
 
         # 부트스트랩 구간이 점추정을 감싸는지(대략)
         for metric in ("f1", "precision"):
+            if row[f"{metric}_ci_method"] == "not_computable":
+                continue
+
             assert row[f"{metric}_boot_lo"] <= row[f"{metric}_boot_hi"]
             assert row[f"{metric}_boot_lo"] - 0.05 <= row[metric] <= row[f"{metric}_boot_hi"] + 0.05
 
@@ -620,7 +844,7 @@ def test_end_to_end_point_estimates_match_existing_results_and_sklearn():
 
     # 논문용 표에는 기본 구간만 표시한다 (참고용 Wilson 값은 표에 나오지 않음)
     for _, row in cond.iterrows():
-        text = stats.with_ci(row["recall"], row["recall_ci_lo"], row["recall_ci_hi"])
+        text = stats.with_ci(row["recall"], row["recall_ci_lo"], row["recall_ci_hi"], method=row["recall_ci_method"])
 
         assert text in md, text
 
@@ -660,8 +884,11 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert row["n_variants_orig_correct"] == den
         assert row["n_kept"] == kept
         assert abs(row["retention_rate"] - kept / den) < 1e-6
-        assert row["retention_boot_lo"] <= row["retention_rate"] + 0.05
-        assert row["retention_boot_hi"] >= row["retention_rate"] - 0.05
+        assert row["ci_method"] in ("cluster_bootstrap", "wilson_cluster_fallback", "not_computable")
+
+        if row["ci_method"] != "not_computable":
+            assert row["retention_boot_lo"] <= row["retention_rate"] + 0.05
+            assert row["retention_boot_hi"] >= row["retention_rate"] - 0.05
 
     # --- Original vs Augmented ---
     delta = pd.read_csv(out_dir / "paired_original_vs_augmented.csv")
@@ -685,8 +912,11 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert abs(row["original"] - parts["original"]) < 1e-6
         assert abs(row["augmented"] - parts["augmented"]) < 1e-6
         assert abs(row["delta_aug_minus_orig"] - (parts["augmented"] - parts["original"])) < 1e-6
-        assert row["delta_boot_lo"] <= row["delta_boot_hi"]
-        assert row["delta_boot_lo"] - 0.1 <= row["delta_aug_minus_orig"] <= row["delta_boot_hi"] + 0.1
+        if row["ci_method"] == "not_computable":
+            assert np.isnan(row["delta_boot_lo"]) and np.isnan(row["delta_boot_hi"])
+        else:
+            assert row["delta_boot_lo"] <= row["delta_boot_hi"]
+            assert row["delta_boot_lo"] - 0.1 <= row["delta_aug_minus_orig"] <= row["delta_boot_hi"] + 0.1
 
     # --- 기법 분해 ---
     groups = pd.read_csv(out_dir / "technique_groups.csv")
@@ -706,7 +936,8 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert abs(row["recall"] - mine["recall"]) < 1e-6
         assert abs(row["fpr"] - mine["fpr"]) < 1e-6
 
-    assert (groups["ci_method"] == "cluster_bootstrap").all()
+    for metric in ("recall", "fpr"):
+        assert groups[f"{metric}_ci_method"].isin(["cluster_bootstrap", "wilson_cluster_fallback", "not_computable"]).all()
 
     # 세 그룹 합이 전체 changed=true 행과 같아야 함
     one = groups.loc[(groups["suite"] == "main") & (groups["model"] == "koelectra") & (groups["training"] == "original")]
@@ -728,14 +959,18 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert abs(row["recall"] - mine["recall"]) < 1e-6
         assert abs(row["fpr"] - mine["fpr"]) < 1e-6
 
-    expected_method = source["scope"].map({"clean_all_rows": "wilson", "changed_only": "cluster_bootstrap"})
+    clean_rows = source["scope"] == "clean_all_rows"
 
-    assert (source["ci_method"] == expected_method).all()
+    for metric in ("recall", "fpr"):
+        assert (source.loc[clean_rows, f"{metric}_ci_method"] == "wilson").all()
+        assert source.loc[~clean_rows, f"{metric}_ci_method"].isin(
+            ["cluster_bootstrap", "wilson_cluster_fallback", "not_computable"]
+        ).all()
 
     # --- 정상 문장의 난독화 오탐률 ---
     benign = pd.read_csv(out_dir / "benign_obfuscation_fpr.csv")
 
-    assert (benign["ci_method"] == "cluster_bootstrap").all()
+    assert benign["ci_method"].isin(["cluster_bootstrap", "wilson_cluster_fallback", "not_computable"]).all()
 
     for _, row in benign.loc[(benign["suite"] == "main") & (benign["scope"] == "overall")].iterrows():
         obf = read_pred(fx, row["model"], row["training"], "obfuscated")
