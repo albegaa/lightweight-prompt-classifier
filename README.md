@@ -270,6 +270,7 @@ Step 1 본실험에서 학습된 classifier의 validation score를 확보한 뒤
     │
     ├── requirements-common.txt
     ├── requirements-local.txt
+    ├── requirements-server.txt
     └── .gitignore
 
 Demo 데이터와 Demo 결과는
@@ -291,6 +292,26 @@ Demo 데이터와 Demo 결과는
 - NVIDIA Tesla P100-PCIE-16GB
 
 P100에서는 BF16이 아니라 FP16을 사용한다.
+
+### 환경 설치
+
+공용 GPU 서버:
+
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements-server.txt
+
+로컬 CPU 환경:
+
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements-local.txt
+
+공통 Python 패키지는 `requirements-common.txt`에서 관리하며,
+PyTorch는 실행 환경에 따라 별도의 requirements 파일에서 설치한다.
+
+- `requirements-server.txt`: 공용 GPU 서버 / CUDA 12.1
+- `requirements-local.txt`: 로컬 CPU 환경
 
 공용 GPU이므로 실제 학습 전 사용 가능한 GPU를 다시 확인한다.
 
@@ -314,7 +335,10 @@ P100에서는 BF16이 아니라 FP16을 사용한다.
 - Original-only 실행 script
 - Augmented 실행 script
 - 데이터 validation script
+- `seed_id` 기반 원문-variant 검증
 - Clean / Obfuscated 평가 script
+- `kg_test` 평가 지원
+- 17종 난독화 평가 지원
 - Augmented training input 표준화
 - changed-only 난독화 후처리
 - technique / intensity별 난독화 분석
@@ -326,11 +350,9 @@ P100에서는 BF16이 아니라 FP16을 사용한다.
 
 현재 진행:
 
-- 최종 JSONL 데이터 계약 반영
-- `seed_id` 기반 원문-variant 검증
-- `kg_test` 평가 지원
-- 17종 난독화 평가 지원
+- 최종 실험 데이터 수령 및 검증
 - Step 1 본실험
+- 실험 결과 정리 및 논문 반영
 
 ---
 
