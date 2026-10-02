@@ -35,7 +35,7 @@ def load_changed_only(path):
 
     if not path.exists():
         raise FileNotFoundError(
-            "Missing obfuscated analysis file: "
+            "Missing KG obfuscated analysis file: "
             f"{path}"
         )
 
@@ -66,9 +66,8 @@ def pct(value):
 def main():
     parser = argparse.ArgumentParser(
         description=(
-            "Generate the main Step 1 comparison table. "
-            "Clean metrics use all clean rows; "
-            "obfuscated metrics use changed=true rows."
+            "Generate the Step 1 KoreanGuardrail "
+            "supplementary evaluation summary."
         )
     )
 
@@ -79,7 +78,7 @@ def main():
 
     parser.add_argument(
         "--output",
-        default="results/step1/table2_summary.csv",
+        default="results/step1/kg_summary.csv",
     )
 
     args = parser.parse_args()
@@ -106,13 +105,13 @@ def main():
 
         clean_path = (
             base
-            / "clean"
+            / "kg_clean"
             / "metrics.json"
         )
 
         obfuscated_path = (
             base
-            / "obfuscated"
+            / "kg_obfuscated"
             / "analysis"
             / "obfuscated_overall.csv"
         )
@@ -129,83 +128,83 @@ def main():
             "model": model_name,
             "training": training_type,
 
-            "clean_n": int(
+            "kg_clean_n": int(
                 clean["n"]
             ),
 
-            "clean_accuracy": pct(
+            "kg_clean_accuracy": pct(
                 clean["accuracy"]
             ),
 
-            "clean_precision": pct(
+            "kg_clean_precision": pct(
                 clean["precision"]
             ),
 
-            "clean_recall": pct(
+            "kg_clean_recall": pct(
                 clean["recall"]
             ),
 
-            "clean_f1": pct(
+            "kg_clean_f1": pct(
                 clean["f1"]
             ),
 
-            "clean_fpr": pct(
+            "kg_clean_fpr": pct(
                 clean["fpr"]
             ),
 
-            "clean_fnr": pct(
+            "kg_clean_fnr": pct(
                 clean["fnr"]
             ),
 
-            "obfuscated_total_rows": int(
+            "kg_obfuscated_total_rows": int(
                 obfuscated["total_rows"]
             ),
 
-            "obfuscated_changed_rows": int(
+            "kg_obfuscated_changed_rows": int(
                 obfuscated["changed_rows"]
             ),
 
-            "obfuscated_application_rate": pct(
+            "kg_obfuscated_application_rate": pct(
                 obfuscated["application_rate"]
             ),
 
-            "obfuscated_n": int(
+            "kg_obfuscated_n": int(
                 obfuscated["n"]
             ),
 
-            "obfuscated_accuracy": pct(
+            "kg_obfuscated_accuracy": pct(
                 obfuscated["accuracy"]
             ),
 
-            "obfuscated_precision": pct(
+            "kg_obfuscated_precision": pct(
                 obfuscated["precision"]
             ),
 
-            "obfuscated_recall": pct(
+            "kg_obfuscated_recall": pct(
                 obfuscated["recall"]
             ),
 
-            "obfuscated_f1": pct(
+            "kg_obfuscated_f1": pct(
                 obfuscated["f1"]
             ),
 
-            "obfuscated_fpr": pct(
+            "kg_obfuscated_fpr": pct(
                 obfuscated["fpr"]
             ),
 
-            "obfuscated_fnr": pct(
+            "kg_obfuscated_fnr": pct(
                 obfuscated["fnr"]
             ),
         }
 
-        row["f1_drop_pp"] = (
-            row["clean_f1"]
-            - row["obfuscated_f1"]
+        row["kg_f1_drop_pp"] = (
+            row["kg_clean_f1"]
+            - row["kg_obfuscated_f1"]
         )
 
-        row["recall_drop_pp"] = (
-            row["clean_recall"]
-            - row["obfuscated_recall"]
+        row["kg_recall_drop_pp"] = (
+            row["kg_clean_recall"]
+            - row["kg_obfuscated_recall"]
         )
 
         rows.append(
@@ -235,24 +234,23 @@ def main():
     display_columns = [
         "model",
         "training",
-        "clean_accuracy",
-        "clean_recall",
-        "clean_f1",
-        "clean_fpr",
-        "obfuscated_application_rate",
-        "obfuscated_recall",
-        "obfuscated_f1",
-        "obfuscated_fpr",
-        "f1_drop_pp",
-        "recall_drop_pp",
+        "kg_clean_recall",
+        "kg_clean_f1",
+        "kg_clean_fpr",
+        "kg_obfuscated_application_rate",
+        "kg_obfuscated_recall",
+        "kg_obfuscated_f1",
+        "kg_obfuscated_fpr",
+        "kg_f1_drop_pp",
+        "kg_recall_drop_pp",
     ]
 
     print(
-        "===== STEP 1 MAIN TABLE ====="
+        "===== STEP 1 KOREANGUARDRAIL SUMMARY ====="
     )
 
     print(
-        "Obfuscated metrics:"
+        "KG obfuscated metrics:"
         " changed=true rows only"
     )
 

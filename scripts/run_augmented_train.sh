@@ -1,87 +1,117 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_KEY="${1:-}"
-GPU="${2:-}"
-EPOCHS="${3:-}"
-BATCH_SIZE="${4:-}"
-
-if [[ -z "$MODEL_KEY" || -z "$GPU" || -z "$EPOCHS" || -z "$BATCH_SIZE" ]]; then
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
     echo "Usage:"
-    echo "  bash scripts/run_augmented_train.sh <koelectra|mdeberta> <gpu> <epochs> <batch_size>"
+    echo "  $0 <model_key> <original_train> <augmented_input> <valid_file> [gpu] [epochs]"
+    echo
+    echo "model_key:"
+    echo "  koelectra"
+    echo "  mdeberta"
     echo
     echo "Example:"
-    echo "  bash scripts/run_augmented_train.sh koelectra 7 3 16"
+    echo "  $0 koelectra \\"
+    echo "    data/step1/train.jsonl \\"
+    echo "    data/step1/augmented_train.jsonl \\"
+    echo "    data/step1/valid.jsonl \\"
+    echo "    0 3"
     exit 1
 fi
 
-TRAIN_FILE="data/step1/augmented/train.csv"
-VALID_FILE="data/step1/original/valid.csv"
+MODEL_KEY="$1"
+ORIGINAL_TRAIN="$2"
+AUGMENTED_INPUT="$3"
+VALID_FILE="$4"
+GPU="${5:-0}"
+EPOCHS="${6:-3}"
 
-if [[ ! -f "$TRAIN_FILE" ]]; then
-    echo "ERROR: missing $TRAIN_FILE"
-    exit 1
-fi
+PYTHON="${PYTHON:-python}"
 
-if [[ ! -f "$VALID_FILE" ]]; then
-    echo "ERROR: missing $VALID_FILE"
-    exit 1
-fi
-
-COMMON_ARGS=(
-    --train "$TRAIN_FILE"
-    --valid "$VALID_FILE"
-    --epochs "$EPOCHS"
-    --batch-size "$BATCH_SIZE"
-    --learning-rate 2e-5
-    --weight-decay 0.01
-    --max-length 128
-    --seed 42
-    --fp16
-)
+BATCH_SIZE="${BATCH_SIZE:-16}"
+LEARNING_RATE="${LEARNING_RATE:-2e-5}"
+WEIGHT_DECAY="${WEIGHT_DECAY:-0.01}"
+MAX_LENGTH="${MAX_LENGTH:-128}"
+SEED="${SEED:-42}"
 
 case "$MODEL_KEY" in
-
     koelectra)
         MODEL_NAME="monologg/koelectra-base-v3-discriminator"
         OUTPUT_DIR="results/step1/koelectra/augmented"
-        EXTRA_ARGS=()
+        TOKENIZER_ARGS=()
         ;;
-
     mdeberta)
         MODEL_NAME="microsoft/mdeberta-v3-base"
         OUTPUT_DIR="results/step1/mdeberta/augmented"
-        EXTRA_ARGS=(
-            --use-slow-tokenizer
-        )
+        TOKENIZER_ARGS=(--use-slow-tokenizer)
         ;;
-
     *)
-        echo "ERROR: unknown model key: $MODEL_KEY"
-        echo "Allowed: koelectra, mdeberta"
+        echo "Unknown model_key: $MODEL_KEY"
+        echo "Use: koelectra or mdeberta"
         exit 1
         ;;
 esac
 
-echo "========================================"
-echo "Step 1 Augmented Training"
-echo "========================================"
-echo "model key   : $MODEL_KEY"
-echo "model       : $MODEL_NAME"
-echo "GPU         : $GPU"
-echo "epochs      : $EPOCHS"
-echo "batch size  : $BATCH_SIZE"
-echo "train       : $TRAIN_FILE"
-echo "valid       : $VALID_FILE"
-echo "output      : $OUTPUT_DIR"
-echo "========================================"
+for FILE in \
+    "$ORIGINAL_TRAIN" \
+    "$AUGMENTED_INPUT" \
+    "$VALID_FILE"
+do
+    if [ ! -f "$FILE" ]; then
+        echo "Data file not found: $FILE"
+        exit 1
+    fi
+done
 
-CUDA_VISIBLE_DEVICES="$GPU" \
-/root/project/.venv/bin/python src/classifier/train.py \
-    --model-name "$MODEL_NAME" \
-    --output-dir "$OUTPUT_DIR" \
-    "${COMMON_ARGS[@]}" \
-    "${EXTRA_ARGS[@]}"
+mkdir -p "$OUTPUT_DIR"
+
+PREPARED_TRAIN="$OUTPUT_DIR/prepared_train.jsonl"
+
+echo "===== STEP 1 AUGMENTED TRAINING ====="
+echo "model key       : $MODEL_KEY"
+echo "model           : $MODEL_NAME"
+echo "original train  : $ORIGINAL_TRAIN"
+echo "augmented input : $AUGMENTED_INPUT"
+echo "valid           : $VALID_FILE"
+echo "prepared train  : $PREPARED_TRAIN"
+echo "output          : $OUTPUT_DIR"
+echo "gpu             : $GPU"
+echo "epochs          : $EPOCHS"
+echo "batch size      : $BATCH_SIZE"
+echo "learning rate   : $LEARNING_RATE"
+echo "weight decay    : $WEIGHT_DECAY"
+echo "max length      : $MAX_LENGTH"
+echo "seed            : $SEED"
+echo
+
+echo "===== PREPARE AUGMENTED TRAIN ====="
+
+"$PYTHON" scripts/prepare_augmented_train.py \
+    --original-train "$ORIGINAL_TRAIN" \
+    --augmented-input "$AUGMENTED_INPUT" \
+    --output "$PREPARED_TRAIN"
 
 echo
-echo "AUGMENTED TRAINING SUCCESS"
+echo "===== VALIDATE AUGMENTED TRAIN ====="
+
+"$PYTHON" scripts/validate_step1_data.py \
+    --train "$ORIGINAL_TRAIN" \
+    --valid "$VALID_FILE" \
+    --augmented-train "$PREPARED_TRAIN"
+
+echo
+echo "===== START TRAINING ====="
+
+CUDA_VISIBLE_DEVICES="$GPU" \
+"$PYTHON" src/classifier/train.py \
+    --model-name "$MODEL_NAME" \
+    --train "$PREPARED_TRAIN" \
+    --valid "$VALID_FILE" \
+    --output-dir "$OUTPUT_DIR" \
+    --epochs "$EPOCHS" \
+    --batch-size "$BATCH_SIZE" \
+    --learning-rate "$LEARNING_RATE" \
+    --weight-decay "$WEIGHT_DECAY" \
+    --max-length "$MAX_LENGTH" \
+    --seed "$SEED" \
+    --fp16 \
+    "${TOKENIZER_ARGS[@]}"

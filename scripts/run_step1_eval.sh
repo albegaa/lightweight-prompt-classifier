@@ -1,117 +1,118 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_KEY="${1:-}"
-TRAINING_TYPE="${2:-}"
-GPU="${3:-}"
-BATCH_SIZE="${4:-}"
-
-if [[ -z "$MODEL_KEY" || -z "$TRAINING_TYPE" || -z "$GPU" || -z "$BATCH_SIZE" ]]; then
+if [ "$#" -lt 4 ] || [ "$#" -gt 6 ]; then
     echo "Usage:"
-    echo "  bash scripts/run_step1_eval.sh <koelectra|mdeberta> <original|augmented> <gpu> <batch_size>"
+    echo "  $0 <model_key> <training_type> <eval_name> <input_file> [gpu] [batch_size]"
     echo
-    echo "Examples:"
-    echo "  bash scripts/run_step1_eval.sh koelectra original 7 16"
-    echo "  bash scripts/run_step1_eval.sh koelectra augmented 7 16"
+    echo "model_key:"
+    echo "  koelectra"
+    echo "  mdeberta"
+    echo
+    echo "training_type:"
+    echo "  original"
+    echo "  augmented"
+    echo
+    echo "recommended eval_name:"
+    echo "  clean"
+    echo "  obfuscated"
+    echo "  kg_clean"
+    echo "  kg_obfuscated"
+    echo
+    echo "Example:"
+    echo "  $0 koelectra original clean data/step1/test.jsonl 0 32"
     exit 1
 fi
 
-if [[ "$TRAINING_TYPE" != "original" && "$TRAINING_TYPE" != "augmented" ]]; then
-    echo "ERROR: unknown training type: $TRAINING_TYPE"
-    echo "Allowed: original, augmented"
-    exit 1
-fi
+MODEL_KEY="$1"
+TRAINING_TYPE="$2"
+EVAL_NAME="$3"
+INPUT_FILE="$4"
+GPU="${5:-0}"
+BATCH_SIZE="${6:-32}"
 
-CLEAN_TEST="data/step1/original/test.csv"
-OBFUSCATED_TEST="data/step1/evaluation/obfuscated_test.csv"
-
-if [[ ! -f "$CLEAN_TEST" ]]; then
-    echo "ERROR: missing $CLEAN_TEST"
-    exit 1
-fi
-
-if [[ ! -f "$OBFUSCATED_TEST" ]]; then
-    echo "ERROR: missing $OBFUSCATED_TEST"
-    exit 1
-fi
+PYTHON="${PYTHON:-python}"
+MAX_LENGTH="${MAX_LENGTH:-128}"
 
 case "$MODEL_KEY" in
-
     koelectra)
-        MODEL_ROOT="results/step1/koelectra"
-        EXTRA_ARGS=()
+        TOKENIZER_ARGS=()
         ;;
-
     mdeberta)
-        MODEL_ROOT="results/step1/mdeberta"
-        EXTRA_ARGS=(
-            --use-slow-tokenizer
-        )
+        TOKENIZER_ARGS=(--use-slow-tokenizer)
         ;;
-
     *)
-        echo "ERROR: unknown model key: $MODEL_KEY"
-        echo "Allowed: koelectra, mdeberta"
+        echo "Unknown model_key: $MODEL_KEY"
+        echo "Use: koelectra or mdeberta"
         exit 1
         ;;
 esac
 
-MODEL_DIR="$MODEL_ROOT/$TRAINING_TYPE/best_model"
+case "$TRAINING_TYPE" in
+    original|augmented)
+        ;;
+    *)
+        echo "Unknown training_type: $TRAINING_TYPE"
+        echo "Use: original or augmented"
+        exit 1
+        ;;
+esac
 
-if [[ ! -d "$MODEL_DIR" ]]; then
-    echo "ERROR: trained model not found:"
-    echo "  $MODEL_DIR"
+case "$EVAL_NAME" in
+    clean|obfuscated|kg_clean|kg_obfuscated)
+        ;;
+    *)
+        echo "Unknown eval_name: $EVAL_NAME"
+        echo "Use: clean, obfuscated, kg_clean, or kg_obfuscated"
+        exit 1
+        ;;
+esac
+
+if [ ! -f "$INPUT_FILE" ]; then
+    echo "Evaluation file not found: $INPUT_FILE"
     exit 1
 fi
 
-OUTPUT_ROOT="$MODEL_ROOT/$TRAINING_TYPE/eval"
+MODEL_DIR="results/step1/${MODEL_KEY}/${TRAINING_TYPE}/best_model"
+OUTPUT_DIR="results/step1/${MODEL_KEY}/${TRAINING_TYPE}/eval/${EVAL_NAME}"
 
-COMMON_ARGS=(
-    --model "$MODEL_DIR"
-    --batch-size "$BATCH_SIZE"
-    --max-length 128
-    --fp16
-)
+if [ ! -d "$MODEL_DIR" ]; then
+    echo "Fine-tuned model directory not found:"
+    echo "  $MODEL_DIR"
+    echo
+    echo "Train the model before evaluation."
+    exit 1
+fi
 
-echo "========================================"
-echo "Step 1 Evaluation"
-echo "========================================"
-echo "model key      : $MODEL_KEY"
-echo "training type  : $TRAINING_TYPE"
-echo "model          : $MODEL_DIR"
-echo "GPU            : $GPU"
-echo "batch size     : $BATCH_SIZE"
-echo "clean test     : $CLEAN_TEST"
-echo "obfuscated test: $OBFUSCATED_TEST"
-echo "output         : $OUTPUT_ROOT"
-echo "========================================"
-
+echo "===== STEP 1 EVALUATION ====="
+echo "model key       : $MODEL_KEY"
+echo "training type   : $TRAINING_TYPE"
+echo "evaluation      : $EVAL_NAME"
+echo "model           : $MODEL_DIR"
+echo "input           : $INPUT_FILE"
+echo "output          : $OUTPUT_DIR"
+echo "gpu             : $GPU"
+echo "batch size      : $BATCH_SIZE"
+echo "max length      : $MAX_LENGTH"
 echo
-echo "===== CLEAN TEST ====="
 
 CUDA_VISIBLE_DEVICES="$GPU" \
-/root/project/.venv/bin/python src/classifier/evaluate.py \
-    "${COMMON_ARGS[@]}" \
-    --input "$CLEAN_TEST" \
-    --output-dir "$OUTPUT_ROOT/clean" \
-    "${EXTRA_ARGS[@]}"
+"$PYTHON" src/classifier/evaluate.py \
+    --model "$MODEL_DIR" \
+    --input "$INPUT_FILE" \
+    --output-dir "$OUTPUT_DIR" \
+    --batch-size "$BATCH_SIZE" \
+    --max-length "$MAX_LENGTH" \
+    --fp16 \
+    "${TOKENIZER_ARGS[@]}"
 
-echo
-echo "===== OBFUSCATED TEST ====="
+if [ "$EVAL_NAME" = "obfuscated" ] || \
+   [ "$EVAL_NAME" = "kg_obfuscated" ]; then
 
-CUDA_VISIBLE_DEVICES="$GPU" \
-/root/project/.venv/bin/python src/classifier/evaluate.py \
-    "${COMMON_ARGS[@]}" \
-    --input "$OBFUSCATED_TEST" \
-    --output-dir "$OUTPUT_ROOT/obfuscated" \
-    "${EXTRA_ARGS[@]}"
+    echo
+    echo "===== OBFUSCATED ANALYSIS ====="
 
-echo
-echo "========================================"
-echo "STEP 1 EVALUATION SUCCESS"
-echo "========================================"
-echo "clean:"
-echo "  $OUTPUT_ROOT/clean/metrics.json"
-echo
-echo "obfuscated:"
-echo "  $OUTPUT_ROOT/obfuscated/metrics.json"
+    "$PYTHON" scripts/analyze_obfuscated_eval.py \
+        --predictions "$OUTPUT_DIR/predictions.csv" \
+        --output-dir "$OUTPUT_DIR/analysis"
+fi
