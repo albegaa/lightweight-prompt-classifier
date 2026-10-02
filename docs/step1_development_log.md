@@ -1891,3 +1891,203 @@ slow tokenizer를 사용하여 동일하게 검증하였다.
 
 실제 연구 성능에 대한 결론은
 최종 데이터 기반 본실험 결과가 나온 뒤 작성한다.
+
+---
+
+## 34.17 원본 데이터 수집 결과 및 데이터 구성 원칙 구체화
+
+데이터 담당 측에서 Step 1 원본 데이터 수집과
+초기 구조·규모 점검을 진행한 결과를 반영하였다.
+
+이번 확인을 통해 초기 데이터 제안 중 일부를
+실제 원본 데이터 특성에 맞게 구체화하였다.
+
+### 원본 데이터 후보
+
+현재 Step 1 원본 구성에 사용하는 데이터는 다음과 같다.
+
+Attack:
+
+- `Lakera/gandalf_ignore_instructions`
+- `xTRam1/safe-guard-prompt-injection`의 attack 행
+
+Benign:
+
+- `xTRam1/safe-guard-prompt-injection`의 benign 행
+- `KoAlpaca-RealQA`
+- `Anthropic/hh-rlhf` helpful-base
+- `awesome-chatgpt-prompts`
+
+초기 후보였던
+
+    deepset/prompt-injections
+
+는 최종 원본 구성에서 제외하기로 하였다.
+
+주요 이유:
+
+- role assignment 및 번역 요청 등이 공격으로 라벨링되어
+  다른 데이터와 label 기준이 충돌함
+- 전체 규모에서 차지하는 비중이 작음
+
+### xTRam1 benign 포함
+
+xTRam1의 `label=0` 행을
+Benign 데이터 후보에 포함하기로 하였다.
+
+Attack과 Benign의 데이터 출처가 완전히 분리될 경우
+모델이 실제 공격 특성 대신
+출처별 문체 또는 formatting 차이를 shortcut으로
+학습할 가능성이 있기 때문이다.
+
+### 원본 split 처리
+
+각 원본 데이터셋이 제공하는
+기존 train / test split은 그대로 사용하지 않는다.
+
+원본 split 사이에도 중복이 확인되었으므로
+
+    전체 원본 통합
+        ↓
+    중복 및 label conflict 제거
+        ↓
+    우리 기준 8 : 1 : 1 재분할
+
+순서로 처리한다.
+
+분할은 augmentation 전에
+원문 문장 단위로 수행한다.
+
+### 데이터 정리 과정에서 확인된 문제
+
+원본 구조 점검 결과 다음 문제가 확인되었다.
+
+- xTRam1 label conflict 2건
+- xTRam1 일부 인코딩 이상
+- hh-rlhf 원본 test의 약 94%가 train과 중복
+- KoAlpaca의 한글 없는 질문 및 지나치게 짧은 질문 존재
+- prompts.chat의 매우 긴 prompt 존재
+- prompts.chat 내 탈옥형 prompt 일부 존재
+- gandalf의 비밀번호 소재 편중
+
+출처 간 exact duplicate도 확인되었다.
+
+- hh-rlhf ↔ xTRam1: 398건
+- prompts.chat ↔ xTRam1: 125건
+
+따라서 최종 split 전에
+출처 내부 및 출처 간 중복 제거를 수행한다.
+
+### 원문 길이 상한
+
+메인 Step 1 원본 데이터에는
+원문 기준 최대 500자 상한을 적용하기로 하였다.
+
+목적:
+
+- 지나치게 긴 입력의 영향 제한
+- 난독화 후 token 수 증가까지 고려
+- 모델 입력 길이 차이에 의한 실험 왜곡 완화
+
+단, 이 기준으로 인해
+500자를 넘는 긴 jailbreak prompt 일부는
+학습 데이터에서 제외된다.
+
+따라서 논문에서는
+긴 DAN류 공격을 충분히 포함하지 못한다는 점을
+데이터 구성의 한계로 기록한다.
+
+### Benign 길이 분포 matching
+
+Benign 데이터는 전체 후보에서
+단순 무작위로 추출하지 않는다.
+
+Attack 데이터의 길이 분포를 기준으로
+길이 구간별로 대응되도록 샘플링하고,
+최종적으로 Attack과 Benign을 1 : 1 규모로 구성한다.
+
+목적은 모델이
+
+    짧은 문장 = Benign
+    긴 문장 = Attack
+
+과 같은 길이 기반 shortcut을 학습하는 가능성을 줄이는 것이다.
+
+### 원본 규모 점검 결과
+
+전체 중복 제거 후 확인된 규모:
+
+Attack:
+
+- gandalf: 999건
+- xTRam1 attack: 3,069건
+- 합계: 4,068건
+
+500자 이하:
+
+- gandalf: 998건
+- xTRam1 attack: 2,618건
+- 합계: 3,616건
+
+Benign:
+
+- xTRam1 benign: 7,064건
+- hh-rlhf: 15,474건
+- KoAlpaca: 18,396건
+- prompts.chat: 2,040건
+- 합계: 42,974건
+
+500자 이하 Benign 후보:
+
+- xTRam1 benign: 5,990건
+- hh-rlhf: 15,466건
+- KoAlpaca: 17,938건
+- prompts.chat: 406건
+- 합계: 39,800건
+
+따라서 500자 상한 적용 후에도
+목표 규모인
+
+- Attack 약 3,000건
+- Benign 약 3,000건
+
+을 구성할 수 있는 후보 pool이 확보되어 있다.
+
+### 아직 최종 확정되지 않은 항목
+
+다음 항목은 실제 최종 데이터 생성 및
+데이터 카드 수신 후 확정한다.
+
+- 최종 출처별 사용 건수
+- Benign 출처별 비율
+- 실제 번역 대상 데이터
+- 번역 도구
+- 번역 품질 확인 방식
+- 최종 train / valid / test 행 수
+- 최종 source 분포
+- 최종 길이 분포
+- augmented input의 실제 형태
+- 17종 난독화 평가셋의 실제 changed rate
+
+따라서 현재 단계에서는
+최종 source 비율이나 번역 범위를 임의로 확정해서 기록하지 않는다.
+
+### B 파트 반영 사항
+
+B 파트에서는 최종 데이터 수신 후
+다음 항목을 추가로 확인한다.
+
+1. validator 전체 통과
+2. Attack / Benign 규모
+3. split별 label 비율
+4. source별 규모
+5. label × source 분포
+6. train / valid / test 원문의 500자 초과 여부
+7. 실제 text 길이 분포
+8. augmented input의 T9b 조건 일치 여부
+9. obfuscated 평가셋의 technique 수
+10. `changed` 분포 및 application rate
+
+이 기준은
+`docs/step1_experiment_plan.md`와
+`docs/step1_runbook.md`에도 반영하였다.

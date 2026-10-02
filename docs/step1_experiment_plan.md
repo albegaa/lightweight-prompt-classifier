@@ -180,10 +180,48 @@ Original-only와 Augmented는
 | `label` | 0 = Benign, 1 = Attack |
 | `source` | 출처 데이터셋 |
 
-목표 데이터 규모:
+목표 최종 데이터 규모:
 
 - Attack 약 3,000건
 - Benign 약 3,000건
+- Attack : Benign = 1 : 1
+
+원본 데이터 후보는 다음과 같다.
+
+Attack:
+
+- `Lakera/gandalf_ignore_instructions`
+- `xTRam1/safe-guard-prompt-injection`의 attack 행
+
+Benign:
+
+- `xTRam1/safe-guard-prompt-injection`의 benign 행
+- `KoAlpaca-RealQA`
+- `Anthropic/hh-rlhf` helpful-base
+- `awesome-chatgpt-prompts`
+
+초기 후보였던 `deepset/prompt-injections`는
+최종 원본 구성에서 제외한다.
+
+제외 이유:
+
+- role assignment 또는 번역 요청까지 공격으로 분류하는 등
+  다른 데이터와 label 기준이 충돌함
+- 전체 규모에서 차지하는 비중이 작음
+
+`xTRam1`의 benign 행도 정상 데이터에 포함한다.
+
+이는 Attack과 Benign의 출처가 완전히 분리될 경우
+모델이 공격 특성 대신 출처별 문체 차이를
+shortcut으로 학습할 가능성을 줄이기 위함이다.
+
+원본 데이터 정리 시 다음 규칙을 적용한다.
+
+- 원본 데이터셋이 제공하는 train / test split은 그대로 사용하지 않음
+- 전체 데이터를 합친 뒤 중복 및 label conflict를 제거
+- 원문 기준 최대 길이 500자 적용
+- 이후 우리 기준으로 train / valid / test를 다시 분할
+- 증강 전에 원문 단위로 split
 
 학습 / 검증 / 평가 분할:
 
@@ -191,10 +229,21 @@ Original-only와 Augmented는
 
 분할 시 다음 원칙을 사용한다.
 
-- 공격:정상 비율을 split별로 동일하게 유지
+- split별 Attack : Benign 비율을 동일하게 유지
 - 고정 random seed 사용
-- 증강 전에 원문 단위로 split
 - 동일 원문이 train / valid / test에 동시에 들어가지 않음
+- augmentation은 train split 이후에만 수행
+
+Benign 데이터는 단순 무작위 추출하지 않고
+Attack 데이터의 길이 분포를 기준으로
+길이 구간별로 대응되도록 샘플링한다.
+
+이를 통해 입력 길이 자체가
+Benign / Attack을 구분하는 shortcut으로 사용되는 가능성을 줄인다.
+
+번역이 필요한 원본 데이터의 최종 번역 범위,
+번역 도구 및 출처별 최종 비율은
+최종 데이터 카드와 실제 생성 결과를 기준으로 기록한다.
 
 ---
 
@@ -237,10 +286,17 @@ Original-only와 Augmented는
 
 - 기법 적용률 확인
 - 실제 변형 여부 검산
-- 필요 시 실제 변형된 행만 별도 분석
+- 전체 raw 평가 결과 보존
 
-난독화 robustness 분석에서는
-분석 목적에 따라 `changed=true` 결과를 별도로 확인한다.
+난독화 robustness의 주 성능은
+
+    changed=true
+
+행을 기준으로 계산한다.
+
+따라서 `changed=false` 행은
+application rate 계산 및 raw artifact에는 포함하지만,
+메인 Obfuscated Recall / F1 / FPR 계산에서는 제외한다.
 
 ### 증강 학습 데이터
 
@@ -351,7 +407,11 @@ KSC 지면이 부족하면
 ## 13. Leakage 원칙
 
 가장 중요한 기준은
-동일 원문 source가 학습과 held-out 평가에 동시에 포함되지 않는 것이다.
+동일 원문 group이 학습과 held-out 평가에 동시에 포함되지 않는 것이다.
+
+여기서 `source` 컬럼은
+원본 데이터셋 출처를 의미하며,
+leakage 판단을 위한 group ID와는 구분한다.
 
 원본 행의 group ID:
 
@@ -375,7 +435,8 @@ variant 행의 group ID:
         ↔
     Obfuscated test variants
 
-동일 held-out 평가 원문의 원문/variant 관계이므로 허용한다.
+동일 held-out 평가 원문의
+원문 / variant 관계이므로 허용한다.
 
 허용:
 
@@ -387,17 +448,20 @@ variant 행의 group ID:
 
 금지:
 
-    Train source
+    Train group
         ↔
-    Validation source
+    Validation group
 
-    Train source
+    Train group
         ↔
-    Test source
+    Test group
 
-    Train source
+    Train group
         ↔
-    KG evaluation source
+    KG evaluation group
+
+또한 원본 데이터를 새로 분할하기 전에
+출처 내부 및 출처 간 exact duplicate를 제거한다.
 
 split 및 variant 관계는
 `id`와 `seed_id`를 이용해 검증한다.
@@ -452,6 +516,9 @@ GPU OOM 등 모델별 기술적 제약이 발생하면
 - Obfuscated F1
 - Obfuscated FPR
 
+Obfuscated 주 성능은
+`changed=true` variant 기준으로 계산한다.
+
 추가 변화량:
 
     F1 Drop
@@ -461,6 +528,18 @@ GPU OOM 등 모델별 기술적 제약이 발생하면
     = Clean Recall - Obfuscated Recall
 
 Drop은 percentage point 단위로 보고한다.
+
+단, Clean 평가셋과
+`changed=true` Obfuscated variant 집합은
+완전히 동일한 표본의 paired 전후 비교가 아니다.
+
+따라서 Drop은
+
+    Clean 대비 changed-only 난독화 평가셋에서
+    관찰된 성능 차이
+
+로 해석하며,
+동일 샘플에 대한 직접적인 인과적 감소량으로 표현하지 않는다.
 
 ---
 
@@ -529,24 +608,29 @@ Step 1 본실험이 완료되고
 - KoELECTRA GPU smoke test
 - mDeBERTa GPU smoke test
 - data validation script
-- Original-only 실행 script
-- Augmented 실행 script
-- Clean / Obfuscated 평가 script
-- Table 2 generator
-- Selective Router prototype
-- Threshold Sweep prototype
-
-현재 반영 작업:
-
-- 최종 JSONL 데이터 계약
 - `id ↔ seed_id` group validation
 - `changed` validation
-- `kg_test` 지원
+- Original-only 실행 script
+- Augmented 실행 script
+- Augmented training input 표준화
+- Clean / Obfuscated 평가 script
+- `kg_test` 평가 지원
 - 17종 난독화 평가 지원
+- changed-only 난독화 분석
+- technique / intensity별 분석
+- Table 2 generator
+- KoreanGuardrail supplementary summary
+- Selective Router prototype
+- Threshold Sweep prototype
+- GPU 서버 실행환경 requirements 정리
+- Step 1 Runbook 정리
 
 본실험 대기:
 
 - 최종 데이터 수신
+- 실제 데이터 validator 통과
+- 실제 데이터 규모 / label / source / 길이 분포 확인
+- 최종 augmented input 확인
 - epochs 확정
 - batch size 확정
 - KoELECTRA Original / Augmented
@@ -554,6 +638,7 @@ Step 1 본실험이 완료되고
 - 최종 Clean / Obfuscated 평가
 - KG 보조 평가
 - 최종 결과표 생성
+- 실제 결과 검산 및 논문 반영
 
 ---
 

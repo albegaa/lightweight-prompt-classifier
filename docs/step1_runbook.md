@@ -312,9 +312,22 @@ variant source group:
 
 ---
 
-# 8. 데이터 규모 및 label 분포 확인
+# 8. 데이터 규모 및 분포 확인
 
-실제 데이터의 행 수와 label 분포를 확인한다.
+실제 데이터의 행 수, label, source 및 길이 분포를 확인한다.
+
+특히 메인 원본 데이터인
+
+- `train`
+- `valid`
+- `test`
+
+는 원문 기준 500자 상한이 적용되었는지 확인한다.
+
+`kg_test`와 난독화 variant는
+동일한 500자 상한 검사의 직접 대상이 아니다.
+
+실행:
 
     "$PYTHON" - <<PY
     import pandas as pd
@@ -350,6 +363,58 @@ variant source group:
                 .to_dict()
             )
 
+        if "source" in df.columns:
+            print(
+                "sources:",
+                df["source"]
+                .value_counts(dropna=False)
+                .to_dict()
+            )
+
+        if {"label", "source"}.issubset(df.columns):
+            print("label x source:")
+            print(
+                pd.crosstab(
+                    df["source"],
+                    df["label"],
+                    dropna=False,
+                ).to_string()
+            )
+
+        if "text" in df.columns:
+            lengths = (
+                df["text"]
+                .astype(str)
+                .str.len()
+            )
+
+            print(
+                "text length:",
+                {
+                    "min": int(lengths.min()),
+                    "median": float(lengths.median()),
+                    "mean": round(float(lengths.mean()), 2),
+                    "max": int(lengths.max()),
+                },
+            )
+
+            if name in {"train", "valid", "test"}:
+                over_500 = int(
+                    (lengths > 500).sum()
+                )
+
+                print(
+                    "text length > 500:",
+                    over_500,
+                )
+
+                if over_500 > 0:
+                    print(
+                        "WARNING:",
+                        "main clean dataset contains "
+                        "texts longer than 500 characters",
+                    )
+
         if "changed" in df.columns:
             print(
                 "changed:",
@@ -366,7 +431,22 @@ variant source group:
             )
     PY
 
-이 결과를 실험 기록에 남긴다.
+확인할 핵심 항목:
+
+- 최종 Attack / Benign 규모
+- split별 Attack : Benign 비율
+- source별 데이터 규모
+- label과 source가 특정 조합에 과도하게 편중되지 않았는지
+- train / valid / test 원문의 500자 초과 여부
+- augmented input의 variant 규모
+- 난독화 평가셋의 `changed` 분포
+- 난독화 technique 개수
+
+정상 데이터는 공격 데이터의 길이 분포에 맞춰
+구간별로 샘플링하는 방식을 사용하므로,
+최종 데이터 카드의 길이 분포도 함께 확인한다.
+
+실제 수치는 실험 기록에 남긴다.
 
 ---
 
