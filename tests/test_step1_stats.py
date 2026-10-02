@@ -210,6 +210,66 @@ def test_bootstrap_interval_close_to_wilson_for_singletons():
     assert lo[0] < 0.8 < hi[0]
 
 
+def test_rate_counts_match_resample():
+    # Recall/FPR 클러스터 부트스트랩의 재표본 합계가 행 단위 계산과 같은지 확인
+    rng = np.random.default_rng(3)
+
+    df = random_frame(rng, 90, 0.5, 0.7)
+    df["seed_id"] = [f"s{i // 3}" for i in range(len(df))]
+
+    for label in (1, 0):
+        arr = stats.rate_counts_by_cluster(df, label)
+
+        names = sorted(df.loc[df["label"] == label, "seed_id"].unique())
+
+        assert arr.shape == (len(names), 2)
+
+        idx = np.array([[0, 0, 2, len(names) - 1, 1]])
+        value = stats.stats_rate(arr[idx].sum(axis=1))[0, 0]
+
+        rows = pd.concat([df.loc[(df["seed_id"] == names[i]) & (df["label"] == label)] for i in idx[0]])
+
+        assert abs(value - (rows["prediction"] == 1).mean()) < 1e-12
+
+
+def test_rate_interval_clustered_is_wider_when_variants_are_correlated():
+    # 한 원문의 변형 10개가 모두 같은 예측이면 행을 독립으로 본 Wilson 구간은 너무 좁다.
+    rows = []
+
+    for i in range(40):
+        for j in range(10):
+            rows.append({"seed_id": f"s{i}", "label": 1, "prediction": int(i < 24)})
+
+    df = pd.DataFrame(rows)
+
+    class A:
+        n_boot = 2000
+        seed = 1
+
+    w_lo, w_hi = stats.rate_interval(df, 1, "wilson", A, "k")
+    b_lo, b_hi = stats.rate_interval(df, 1, "cluster_bootstrap", A, "k")
+
+    assert (b_hi - b_lo) > 2 * (w_hi - w_lo), (b_lo, b_hi, w_lo, w_hi)
+    assert b_lo < 0.6 < b_hi
+
+    # 원문 1문장 = 1행이면 두 방법이 비슷하다
+    single = pd.DataFrame({
+        "seed_id": [f"s{i}" for i in range(400)],
+        "label": 1,
+        "prediction": [1] * 320 + [0] * 80,
+    })
+
+    s_lo, s_hi = stats.rate_interval(single, 1, "wilson", A, "k")
+    c_lo, c_hi = stats.rate_interval(single, 1, "cluster_bootstrap", A, "k")
+
+    assert abs(s_lo - c_lo) < 0.02 and abs(s_hi - c_hi) < 0.02
+
+    # 해당 label 행이 없으면 nan
+    none_lo, none_hi = stats.rate_interval(single, 0, "cluster_bootstrap", A, "k")
+
+    assert np.isnan(none_lo) and np.isnan(none_hi)
+
+
 def test_technique_group_assignment():
     pairs = stats.parse_train_techniques("yamin_swap:0.7,symbol_insert:0.3")
 
@@ -535,13 +595,40 @@ def test_end_to_end_point_estimates_match_existing_results_and_sklearn():
 
         assert abs(row["fpr_wilson_lo"] - lo) < 1e-6 and abs(row["fpr_wilson_hi"] - hi) < 1e-6
 
+        # 기본 구간: clean은 Wilson, obfuscated는 클러스터 부트스트랩 (Wilson은 참고 열)
+        if row["scope"] == "clean_all_rows":
+            assert row["ci_method"] == "wilson"
+            assert row["recall_ci_lo"] == row["recall_wilson_lo"] and row["recall_ci_hi"] == row["recall_wilson_hi"]
+            assert row["fpr_ci_lo"] == row["fpr_wilson_lo"] and row["fpr_ci_hi"] == row["fpr_wilson_hi"]
+        else:
+            assert row["ci_method"] == "cluster_bootstrap"
+
+            for metric in ("recall", "fpr"):
+                lo, hi = row[f"{metric}_ci_lo"], row[f"{metric}_ci_hi"]
+
+                assert lo <= hi
+                assert lo - 0.05 <= row[metric] <= hi + 0.05, (metric, lo, row[metric], hi)
+
         # 부트스트랩 구간이 점추정을 감싸는지(대략)
         for metric in ("f1", "precision"):
             assert row[f"{metric}_boot_lo"] <= row[f"{metric}_boot_hi"]
             assert row[f"{metric}_boot_lo"] - 0.05 <= row[metric] <= row[f"{metric}_boot_hi"] + 0.05
 
-    assert (out_dir / "step1_stats_tables.md").exists()
+    md = (out_dir / "step1_stats_tables.md").read_text(encoding="utf-8")
+
     assert (out_dir / "run_info.json").exists()
+
+    # 논문용 표에는 기본 구간만 표시한다 (참고용 Wilson 값은 표에 나오지 않음)
+    for _, row in cond.iterrows():
+        text = stats.with_ci(row["recall"], row["recall_ci_lo"], row["recall_ci_hi"])
+
+        assert text in md, text
+
+        if row["scope"] == "changed_only":
+            wilson_text = stats.with_ci(row["recall"], row["recall_wilson_lo"], row["recall_wilson_hi"])
+
+            if wilson_text != text:
+                assert wilson_text not in md.split("### " + row["eval_name"])[1].split("###")[0], wilson_text
 
 
 def test_end_to_end_paired_and_group_tables_match_independent_computation():
@@ -619,6 +706,8 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert abs(row["recall"] - mine["recall"]) < 1e-6
         assert abs(row["fpr"] - mine["fpr"]) < 1e-6
 
+    assert (groups["ci_method"] == "cluster_bootstrap").all()
+
     # 세 그룹 합이 전체 changed=true 행과 같아야 함
     one = groups.loc[(groups["suite"] == "main") & (groups["model"] == "koelectra") & (groups["training"] == "original")]
     obf = read_pred(fx, "koelectra", "original", "obfuscated")
@@ -639,8 +728,14 @@ def test_end_to_end_paired_and_group_tables_match_independent_computation():
         assert abs(row["recall"] - mine["recall"]) < 1e-6
         assert abs(row["fpr"] - mine["fpr"]) < 1e-6
 
+    expected_method = source["scope"].map({"clean_all_rows": "wilson", "changed_only": "cluster_bootstrap"})
+
+    assert (source["ci_method"] == expected_method).all()
+
     # --- 정상 문장의 난독화 오탐률 ---
     benign = pd.read_csv(out_dir / "benign_obfuscation_fpr.csv")
+
+    assert (benign["ci_method"] == "cluster_bootstrap").all()
 
     for _, row in benign.loc[(benign["suite"] == "main") & (benign["scope"] == "overall")].iterrows():
         obf = read_pred(fx, row["model"], row["training"], "obfuscated")

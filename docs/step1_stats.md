@@ -39,9 +39,18 @@ python scripts/step1_stats.py \
   `zero_division=0`, 분모가 0이면 0.0. FPR = FP/(FP+TN).
 - clean은 전체 행, obfuscated는 `changed=true` 행. `changed` 정규화 규칙도 기존 코드와 같다.
 - 원문 행은 `seed_id = id`로 취급한다 (clean 평가 및 `seed_id`가 비어 있는 행).
-- **Recall, FPR:** Wilson 95% 구간(z=1.96). 한 원문에서 나온 변형들은 독립이 아니므로, 난독화 평가의
-  Wilson 구간은 실제보다 좁을 수 있다. 참고용으로 클러스터 부트스트랩 구간도 `condition_metrics.csv`에 같이 저장한다.
-- **F1, Precision:** `seed_id` 단위 클러스터 부트스트랩(반복 2000, 시드 고정, 백분위 95% 구간).
+- **Recall, FPR (구간 방식이 평가 종류에 따라 다름):**
+  - `clean`, `kg_clean`(원문 1문장 = 1행): **Wilson 95% 구간**(z=1.96).
+  - `obfuscated`, `kg_obfuscated`(원문 1개에서 변형 여러 행): **seed_id 클러스터 부트스트랩**이 기본 구간이다.
+    Recall은 공격 행 중 예측 1의 비율, FPR은 정상 행 중 예측 1의 비율이며, 해당 label의 `seed_id`를
+    복원추출해(반복 2000, 시드 고정) 백분위 95% 구간을 구한다. 같은 원문에서 나온 변형은 서로 독립이 아니므로
+    (원문이 어려우면 변형 여러 개가 함께 틀림) 행을 독립으로 보는 Wilson을 쓰면 구간이 실제보다 좁아진다.
+    그래서 변형 여러 개가 한 원문을 이루는 평가에서는 원문(seed)을 표본 단위로 삼는다.
+    Wilson 값은 비교용으로 `*_wilson_lo/hi` 열에만 남기고, 논문용 markdown 표에는 기본 구간만 표시한다.
+  - 기법 분해·source별(난독화)·정상 문장 난독화 오탐률도 같은 규칙(난독화는 클러스터 부트스트랩)이다.
+    clean 쪽 값은 Wilson이다. `ci_method` 열에 어떤 방식인지 기록한다.
+- **F1, Precision:** 모든 평가에서 `seed_id` 단위 클러스터 부트스트랩(반복 2000, 시드 고정, 백분위 95% 구간).
+  clean은 클러스터가 1행이라 일반 부트스트랩과 같다.
 - **Original vs Augmented:** 같은 모델·같은 `eval_name`의 두 `predictions.csv`를 `id`로 결합하고,
   같은 `seed_id` 클러스터 재표본으로 Δ(Augmented − Original)의 Recall·FPR·F1 구간을 구한다.
 - **원문 vs 변형:** clean의 `id`와 obfuscated의 `seed_id`로 짝을 지어(원문 1 : 변형 다),
@@ -54,7 +63,8 @@ python scripts/step1_stats.py \
 
 `condition_metrics.csv`, `paired_original_vs_augmented.csv`, `paired_original_vs_variant.csv`,
 `technique_groups.csv`, `source_metrics.csv`, `benign_obfuscation_fpr.csv`,
-`step1_stats_tables.md`(논문용 표: % 소수 첫째 자리, 괄호에 95% 구간), `run_info.json`(시드, 입력·예측 파일 sha256 등).
+`step1_stats_tables.md`(논문용 표: % 소수 첫째 자리, 괄호에 기본 95% 구간만 표시), `run_info.json`(시드, 입력·예측 파일 sha256 등).
+csv의 `*_ci_lo/hi`가 기본 구간, `*_wilson_lo/hi`는 참고용 Wilson 구간이다.
 
 ## 테스트
 

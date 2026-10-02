@@ -9,9 +9,10 @@ changed 정규화 규칙은 evaluate.py / analyze_obfuscated_eval.py와 같다.
 
 계산:
   1. 조건별(model x training) clean / obfuscated(changed=true) Recall, FPR, F1, Precision
-     - Recall, FPR: Wilson 95% 구간
+     - clean 계열(원문 1문장 = 1행): Recall, FPR은 Wilson 95% 구간
+     - obfuscated 계열(원문 1개 = 변형 여러 행): Recall, FPR도 seed_id 클러스터 부트스트랩이
+       기본 구간이고 Wilson은 참고 열(*_wilson_*)로만 저장
      - F1, Precision: seed_id 클러스터 부트스트랩 95% 구간
-       (Recall, FPR의 부트스트랩 구간도 참고용으로 같이 저장)
   2. Original vs Augmented (같은 모델, 같은 eval_name) paired 차이
      (Augmented - Original) - 같은 id로 결합, seed_id 클러스터 부트스트랩
   3. 원문 vs 변형 paired: 원문(clean, id)에서 맞힌 공격 중 변형(obfuscated, seed_id) 후에도
@@ -265,6 +266,87 @@ def counts_by_cluster(df):
     grouped = work.groupby("seed_id", sort=True)[["tp", "fp", "fn", "tn"]].sum()
 
     return grouped
+
+
+def ci_method_for(kind):
+    """clean 계열(원문 1문장 = 1행)은 Wilson, obfuscated 계열(원문 1개 = 변형 여러 행)은 클러스터 부트스트랩."""
+    return "wilson" if kind == "clean" else "cluster_bootstrap"
+
+
+def rate_counts_by_cluster(df, label):
+    """label 행에서 seed_id별 [예측 1 건수, 행 수] 배열 (Recall: label=1, FPR: label=0)."""
+    part = df.loc[df["label"] == label]
+
+    hit = (part["prediction"] == 1).astype(int)
+
+    grouped = (
+        pd.DataFrame({"seed_id": part["seed_id"].to_numpy(), "hit": hit.to_numpy()})
+        .groupby("seed_id", sort=True)["hit"]
+        .agg(["sum", "count"])
+    )
+
+    return grouped.to_numpy(dtype=np.int64)
+
+
+def stats_rate(sums):
+    """합계 (B, 2: hit, n) -> (B, 1) 비율."""
+    return safe_ratio(sums[:, 0], sums[:, 1])[:, None]
+
+
+def rate_interval(df, label, method, args, key):
+    """
+    label 행 중 예측 1의 비율(Recall 또는 FPR)의 95% 구간.
+    method='wilson'은 행을 독립으로 보고, 'cluster_bootstrap'은 seed_id를 클러스터로 재표본한다.
+    """
+    part = df.loc[df["label"] == label]
+
+    if method == "wilson":
+        return wilson_interval(int((part["prediction"] == 1).sum()), len(part))
+
+    arr = rate_counts_by_cluster(df, label)
+
+    if len(arr) == 0:
+        return (float("nan"), float("nan"))
+
+    samples = cluster_bootstrap(
+        [arr],
+        stats_rate,
+        args.n_boot,
+        make_rng(args.seed, f"rate|{label}|{key}"),
+    )
+
+    lo, hi = percentile_interval(samples)
+
+    return (float(lo[0]), float(hi[0]))
+
+
+def rate_block(df, method, args, key):
+    """Recall / FPR의 기본 구간(method)과 참고용 Wilson 구간."""
+    attack = df.loc[df["label"] == 1]
+    benign = df.loc[df["label"] == 0]
+
+    n_attack, n_benign = len(attack), len(benign)
+
+    tp = int((attack["prediction"] == 1).sum())
+    fp = int((benign["prediction"] == 1).sum())
+
+    rec_ci = rate_interval(df, 1, method, args, key)
+    fpr_ci = rate_interval(df, 0, method, args, key)
+
+    rec_w = wilson_interval(tp, n_attack)
+    fpr_w = wilson_interval(fp, n_benign)
+
+    return {
+        "ci_method": method,
+        "recall_ci_lo": rec_ci[0],
+        "recall_ci_hi": rec_ci[1],
+        "recall_wilson_lo": rec_w[0],
+        "recall_wilson_hi": rec_w[1],
+        "fpr_ci_lo": fpr_ci[0],
+        "fpr_ci_hi": fpr_ci[1],
+        "fpr_wilson_lo": fpr_w[0],
+        "fpr_wilson_hi": fpr_w[1],
+    }
 
 
 def stats_single(sums):
@@ -664,21 +746,24 @@ def analyze_conditions(conditions, args):
         df = cond["frame"]
         point = point_metrics(df)
 
-        rec_lo, rec_hi = wilson_interval(point["tp"], point["tp"] + point["fn"])
-        fpr_lo, fpr_hi = wilson_interval(point["fp"], point["fp"] + point["tn"])
+        method = ci_method_for(kind)
+        key = f"cond|{suite}|{model}|{training}|{kind}"
+
+        block = rate_block(df, method, args, key)
 
         counts = counts_by_cluster(df)
 
+        # F1, Precision은 두 클래스를 함께 쓰므로 seed_id 클러스터를 재표본한다.
         samples = cluster_bootstrap(
             [counts.to_numpy()],
             stats_single,
             args.n_boot,
-            make_rng(args.seed, f"cond|{suite}|{model}|{training}|{kind}"),
+            make_rng(args.seed, key),
         )
 
         lo, hi = percentile_interval(samples)
 
-        rows.append({
+        row = {
             "suite": suite,
             "model": model,
             "training": training,
@@ -693,22 +778,18 @@ def analyze_conditions(conditions, args):
             "fn": point["fn"],
             "tn": point["tn"],
             "recall": point["recall"],
-            "recall_wilson_lo": rec_lo,
-            "recall_wilson_hi": rec_hi,
-            "recall_boot_lo": lo[0],
-            "recall_boot_hi": hi[0],
             "fpr": point["fpr"],
-            "fpr_wilson_lo": fpr_lo,
-            "fpr_wilson_hi": fpr_hi,
-            "fpr_boot_lo": lo[1],
-            "fpr_boot_hi": hi[1],
             "f1": point["f1"],
             "f1_boot_lo": lo[2],
             "f1_boot_hi": hi[2],
             "precision": point["precision"],
             "precision_boot_lo": lo[3],
             "precision_boot_hi": hi[3],
-        })
+        }
+
+        row.update(block)
+
+        rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -907,23 +988,27 @@ def analyze_technique_groups(conditions, args, train_pairs):
                 for group, part in obf.groupby("group", sort=True):
                     point = point_metrics(part)
 
-                    rec_lo, rec_hi = wilson_interval(point["tp"], point["tp"] + point["fn"])
-                    fpr_lo, fpr_hi = wilson_interval(point["fp"], point["fp"] + point["tn"])
+                    block = rate_block(
+                        part,
+                        "cluster_bootstrap",
+                        args,
+                        f"grp|{suite}|{model}|{training}|{group}",
+                    )
 
-                    rows.append({
+                    row = {
                         "suite": suite,
                         "model": model,
                         "training": training,
                         "group": group,
                         "n_attack": point["tp"] + point["fn"],
                         "recall": point["recall"],
-                        "recall_wilson_lo": rec_lo,
-                        "recall_wilson_hi": rec_hi,
                         "n_benign": point["fp"] + point["tn"],
                         "fpr": point["fpr"],
-                        "fpr_wilson_lo": fpr_lo,
-                        "fpr_wilson_hi": fpr_hi,
-                    })
+                    }
+
+                    row.update(block)
+
+                    rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -941,10 +1026,14 @@ def analyze_sources(conditions, args):
         for source, part in df.groupby("source", sort=True):
             point = point_metrics(part)
 
-            rec_lo, rec_hi = wilson_interval(point["tp"], point["tp"] + point["fn"])
-            fpr_lo, fpr_hi = wilson_interval(point["fp"], point["fp"] + point["tn"])
+            block = rate_block(
+                part,
+                ci_method_for(kind),
+                args,
+                f"src|{suite}|{model}|{training}|{kind}|{source}",
+            )
 
-            rows.append({
+            row = {
                 "suite": suite,
                 "model": model,
                 "training": training,
@@ -953,13 +1042,13 @@ def analyze_sources(conditions, args):
                 "source": source,
                 "n_attack": point["tp"] + point["fn"],
                 "recall": point["recall"],
-                "recall_wilson_lo": rec_lo,
-                "recall_wilson_hi": rec_hi,
                 "n_benign": point["fp"] + point["tn"],
                 "fpr": point["fpr"],
-                "fpr_wilson_lo": fpr_lo,
-                "fpr_wilson_hi": fpr_hi,
-            })
+            }
+
+            row.update(block)
+
+            rows.append(row)
 
     return pd.DataFrame(rows)
 
@@ -979,6 +1068,7 @@ def analyze_benign_obfuscation(conditions, args):
 
                 clean_benign = clean.loc[clean["label"] == 0]
                 clean_fp = int((clean_benign["prediction"] == 1).sum())
+                clean_ci = wilson_interval(clean_fp, len(clean_benign))
 
                 benign = obf.loc[obf["label"] == 0]
 
@@ -991,9 +1081,15 @@ def analyze_benign_obfuscation(conditions, args):
                     n = int(len(part))
                     fp = int((part["prediction"] == 1).sum())
 
-                    lo, hi = wilson_interval(fp, n)
+                    ci = rate_interval(
+                        part,
+                        0,
+                        "cluster_bootstrap",
+                        args,
+                        f"benign|{suite}|{model}|{training}|{scope}",
+                    )
 
-                    clean_lo, clean_hi = wilson_interval(clean_fp, len(clean_benign))
+                    wilson = wilson_interval(fp, n)
 
                     rows.append({
                         "suite": suite,
@@ -1001,14 +1097,18 @@ def analyze_benign_obfuscation(conditions, args):
                         "training": training,
                         "scope": scope,
                         "n_benign_changed": n,
+                        "n_seeds": int(part["seed_id"].nunique()),
                         "false_positives": fp,
                         "fpr": fp / n if n > 0 else float("nan"),
-                        "fpr_wilson_lo": lo,
-                        "fpr_wilson_hi": hi,
+                        "ci_method": "cluster_bootstrap",
+                        "fpr_ci_lo": ci[0],
+                        "fpr_ci_hi": ci[1],
+                        "fpr_wilson_lo": wilson[0],
+                        "fpr_wilson_hi": wilson[1],
                         "clean_n_benign": int(len(clean_benign)),
                         "clean_fpr": clean_fp / len(clean_benign) if len(clean_benign) else float("nan"),
-                        "clean_fpr_wilson_lo": clean_lo,
-                        "clean_fpr_wilson_hi": clean_hi,
+                        "clean_fpr_ci_lo": clean_ci[0],
+                        "clean_fpr_ci_hi": clean_ci[1],
                     })
 
     return pd.DataFrame(rows)
@@ -1066,7 +1166,8 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
     parts.append("# Step 1 보조 통계")
     parts.append(
         "값은 %, 소수 첫째 자리. 괄호는 95% 구간. "
-        "Recall·FPR은 Wilson 구간, F1·Precision은 seed_id 클러스터 부트스트랩 구간"
+        "구간: clean 계열의 Recall·FPR은 Wilson(원문 1문장 = 1행), "
+        "obfuscated 계열의 Recall·FPR과 모든 F1·Precision은 seed_id 클러스터 부트스트랩"
         f"(반복 {args.n_boot}, 시드 {args.seed}). 난독화 평가는 changed=true 행 기준."
     )
 
@@ -1087,8 +1188,8 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                     model,
                     training,
                     int(r["n"]),
-                    with_ci(r["recall"], r["recall_wilson_lo"], r["recall_wilson_hi"]),
-                    with_ci(r["fpr"], r["fpr_wilson_lo"], r["fpr_wilson_hi"]),
+                    with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
+                    with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
                     with_ci(r["f1"], r["f1_boot_lo"], r["f1_boot_hi"]),
                     with_ci(r["precision"], r["precision_boot_lo"], r["precision_boot_hi"]),
                 ])
@@ -1156,9 +1257,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 training,
                 r["group"],
                 int(r["n_attack"]),
-                with_ci(r["recall"], r["recall_wilson_lo"], r["recall_wilson_hi"]),
+                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
                 int(r["n_benign"]),
-                with_ci(r["fpr"], r["fpr_wilson_lo"], r["fpr_wilson_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
             ])
 
         trained = ", ".join(f"{n}:{i}" for n, i in train_pairs)
@@ -1182,9 +1283,9 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 r["eval_name"],
                 r["source"],
                 int(r["n_attack"]),
-                with_ci(r["recall"], r["recall_wilson_lo"], r["recall_wilson_hi"]),
+                with_ci(r["recall"], r["recall_ci_lo"], r["recall_ci_hi"]),
                 int(r["n_benign"]),
-                with_ci(r["fpr"], r["fpr_wilson_lo"], r["fpr_wilson_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
             ])
 
         parts.append("### source별 Recall / FPR")
@@ -1204,10 +1305,10 @@ def write_markdown(path, cond_df, delta_df, retain_df, group_df, source_df, beni
                 model,
                 training,
                 int(r["clean_n_benign"]),
-                with_ci(r["clean_fpr"], r["clean_fpr_wilson_lo"], r["clean_fpr_wilson_hi"]),
+                with_ci(r["clean_fpr"], r["clean_fpr_ci_lo"], r["clean_fpr_ci_hi"]),
                 int(r["n_benign_changed"]),
                 int(r["false_positives"]),
-                with_ci(r["fpr"], r["fpr_wilson_lo"], r["fpr_wilson_hi"]),
+                with_ci(r["fpr"], r["fpr_ci_lo"], r["fpr_ci_hi"]),
             ])
 
         parts.append("### 정상 문장의 난독화 오탐률 (label 0 & changed=true)")
