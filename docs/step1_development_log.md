@@ -1,5 +1,15 @@
 # Step 1 Lightweight Prompt Classifier 개발 문서
 
+> **문서 읽는 법**
+>
+> 이 문서는 Step 1 개발 과정을 시간순으로 보존하는 개발 기록이다.
+> 앞쪽 절의 "현재 상태", "남은 결정" 등은 작성 당시의 상태를 나타내며
+> 이후 개발 과정에서 변경된 내용은 문서 마지막의 최신 상태 절에서 갱신한다.
+>
+> 현재 실행 절차는 `docs/step1_runbook.md`,
+> 현재 실험 설계는 `docs/step1_experiment_plan.md`,
+> 저장소의 현재 역할은 `README.md`를 기준으로 한다.
+
 ## 1. 목적
 
 본 저장소는 한국어 프롬프트 공격 탐지를 위한 경량 Binary Classifier의
@@ -1139,3 +1149,528 @@ Step 1 본실험을 실행할 수 있는 공용 학습·평가 파이프라인�
 
 Smoke Test에 사용한 Demo 데이터는 코드 기능 검증용이며,
 최종 연구 결과는 실제 Step 1 데이터로 수행하는 본실험 이후 작성한다.
+
+---
+
+# 34. 2026-10-02 Step 1 구조 재정리 및 본실험 파이프라인 확정
+
+## 34.1 저장소 역할 재정의
+
+프로젝트 저장소의 역할을 다음과 같이 정리하였다.
+
+### lightweight-prompt-classifier
+
+B 파트 개인 Step 1 개발 저장소.
+
+담당 범위:
+
+- 경량 classifier 개발
+- KoELECTRA / mDeBERTa fine-tuning
+- Original-only / Augmented 비교
+- Clean / Obfuscated robustness 평가
+- KoreanGuardrail 보조 평가
+- 초기 Selective Router prototype 보존
+
+본 저장소의 classifier가 안정화된 이후
+최종 통합에 필요한 검증된 구성요소만
+별도의 팀 통합 저장소로 이관한다.
+
+### B-screening
+
+B 파트 개인 연구 및 실험 기록 저장소.
+
+주요 기록:
+
+- T4 Reference Detector
+- T6 Detector Evasion
+- T9a Effective Attack
+- T9b 결과 연결
+- Step 1 주요 실험 결정 및 해석
+
+active classifier code의 기준 저장소로 사용하지 않는다.
+
+### 향후 팀 통합 저장소
+
+A/B/C가 공동 작업할 최종 시스템 저장소.
+
+목표 구조:
+
+    Input
+      ↓
+    Lightweight Classifier
+      ↓
+    Selective Router
+      ↓
+    JailGuard
+      ↓
+    Target LLM
+
+각 개인 저장소 전체를 복사하는 것이 아니라
+최종 pipeline에 필요한 검증된 코드만 이관한다.
+
+동일한 active code를 개인 저장소와
+팀 통합 저장소에서 동시에 수정하지 않는 것을 원칙으로 한다.
+
+---
+
+## 34.2 최종 데이터 계약 반영
+
+원본 데이터:
+
+- train
+- valid
+- test
+- kg_test
+
+기본 필드:
+
+- `id`
+- `text`
+- `label`
+- `source`
+
+variant 데이터 추가 필드:
+
+- `seed_id`
+- `technique`
+- `intensity`
+- `changed`
+- `n_changed`
+
+source group은 다음과 같이 해석한다.
+
+    Original row
+    → id
+
+    Variant row
+    → seed_id
+
+즉,
+
+    original.id == variant.seed_id
+
+관계를 이용해 원본과 variant를 연결한다.
+
+---
+
+## 34.3 T9b 결과 반영
+
+T9b 사전 pass 기준을 만족한 기법은 0종이었다.
+
+ambiguous fallback 규칙에 따라
+Step 1 증강 조건으로 다음 두 cell을 선정하였다.
+
+- `yamin_swap`, intensity `0.7`
+- `symbol_insert`, intensity `0.3`
+
+두 조건은 효과가 입증된 pass 기법이 아니라
+ambiguous 경계 사례이다.
+
+따라서 논문 및 결과 해석에서도
+"유효한 공격 기법을 발견했다"는 식으로 표현하지 않는다.
+
+---
+
+## 34.4 데이터 validator 개편
+
+`scripts/validate_step1_data.py`를
+최종 데이터 계약에 맞게 개편하였다.
+
+지원 데이터:
+
+- train
+- valid
+- test
+- kg_test
+- augmented_train
+- obfuscated_test
+- obfuscated_kg_test
+
+주요 검사:
+
+- 필수 필드
+- null / empty
+- label 0/1
+- ID 중복
+- conflicting label
+- exact-text leakage
+- source-group leakage
+- variant `seed_id`의 parent 존재 여부
+- variant label 일치 여부
+- variant source 일치 여부
+- augmented variant의 `changed=false` 금지
+
+허용 overlap:
+
+    train ↔ augmented_train
+    test ↔ obfuscated_test
+    kg_test ↔ obfuscated_kg_test
+
+Synthetic test 결과:
+
+1. 정상 구조 → `VALIDATION PASSED`
+2. augmented `changed=false` → 의도대로 실패
+3. train / test source-group leakage → 의도대로 실패
+
+---
+
+## 34.5 Augmented 학습 입력 표준화
+
+`scripts/prepare_augmented_train.py`를 추가하였다.
+
+목적:
+
+A가 전달하는 augmented 파일 형식이
+
+1. variant-only
+2. original + variant 합본
+
+중 어느 형태이더라도
+동일한 Step 1 학습 pipeline을 사용할 수 있도록 한다.
+
+variant-only 입력:
+
+    original train
+        +
+    variants
+        ↓
+    prepared_train.jsonl
+
+combined 입력:
+
+    original + variants
+        ↓
+    원본 completeness 검증
+        ↓
+    prepared_train.jsonl
+
+검사:
+
+- variant seed가 original train에 존재하는지
+- `changed=false`가 없는지
+- variant ID 충돌 여부
+- 합본 원문이 original train과 동일한지
+
+Synthetic test에서
+variant-only와 combined 입력을 모두 검증하였다.
+
+---
+
+## 34.6 학습 실행 script 개편
+
+### Original-only
+
+`scripts/run_original_train.sh`
+
+입력:
+
+- model key
+- train file
+- valid file
+- GPU
+- epochs
+
+CSV 고정 경로를 제거하고
+실제 JSONL 파일 경로를 인자로 받도록 변경하였다.
+
+지원 모델:
+
+- KoELECTRA
+- mDeBERTa
+
+### Augmented
+
+`scripts/run_augmented_train.sh`
+
+내부 흐름:
+
+    original train
+        +
+    augmented input
+        ↓
+    prepare_augmented_train.py
+        ↓
+    prepared_train.jsonl
+        ↓
+    validate_step1_data.py
+        ↓
+    train.py
+
+Original-only와 동일한 validation set을 사용한다.
+
+---
+
+## 34.7 평가 pipeline 확장
+
+`scripts/run_step1_eval.sh`를
+임의 평가 파일을 받을 수 있는 구조로 변경하였다.
+
+지원 평가:
+
+- `clean`
+- `obfuscated`
+- `kg_clean`
+- `kg_obfuscated`
+
+따라서 네 학습 조건에 대해
+
+    4 training conditions
+        ×
+    4 evaluation sets
+        =
+    16 evaluations
+
+을 동일한 script로 수행할 수 있다.
+
+---
+
+## 34.8 평가 metadata 보존 확인
+
+`src/classifier/evaluate.py`는
+입력 DataFrame을 복사한 뒤
+
+- `prediction`
+- `attack_score`
+
+를 추가하여 `predictions.csv`를 저장한다.
+
+따라서 난독화 평가 입력에 존재하는
+
+- `id`
+- `seed_id`
+- `source`
+- `technique`
+- `intensity`
+- `changed`
+- `n_changed`
+
+metadata가 결과 파일에도 그대로 보존된다.
+
+`attack_score`는 calibrated probability가 아니라
+class 1의 softmax score이다.
+
+---
+
+## 34.9 난독화 평가 후처리 추가
+
+`scripts/analyze_obfuscated_eval.py`를 추가하였다.
+
+출력:
+
+- `obfuscated_overall.csv`
+- `obfuscated_by_technique.csv`
+- `obfuscated_by_cell.csv`
+
+분석:
+
+### all_rows
+
+변형 시도 전체 행 기준 raw 평가.
+
+### changed_only
+
+실제로 문자열이 변경된
+`changed=true` 행만을 사용한 평가.
+
+### application_rate
+
+    changed=true rows
+    -----------------
+       total rows
+
+난독화 robustness의 주 결과는
+`changed_only`를 사용한다.
+
+단, all_rows 결과도 raw artifact로 보존한다.
+
+추가 분석:
+
+- technique별
+- technique × intensity별
+
+Synthetic predictions를 이용한 자동 assertion test에서
+
+    ALL ASSERTIONS PASSED
+
+를 확인하였다.
+
+---
+
+## 34.10 Main Step 1 결과표 변경
+
+`scripts/make_step1_table.py`를 수정하였다.
+
+Clean 결과:
+
+    eval/clean/metrics.json
+
+Obfuscated 결과:
+
+    eval/obfuscated/analysis/obfuscated_overall.csv
+    scope = changed_only
+
+즉 메인 난독화 결과에는
+실제 변형된 행만 사용한다.
+
+추가 기록:
+
+- total obfuscated rows
+- changed rows
+- application rate
+- F1 Drop
+- Recall Drop
+
+Synthetic result test에서
+`all_rows`에 의도적으로 F1 99%를 입력하고
+`changed_only`에는 다른 값을 입력하였다.
+
+최종 table이 `changed_only` 값을 읽는 것을 확인하였고,
+
+    ALL TABLE ASSERTIONS PASSED
+
+를 확인하였다.
+
+---
+
+## 34.11 KoreanGuardrail 보조 평가 추가
+
+`scripts/make_step1_kg_summary.py`를 추가하였다.
+
+Clean:
+
+    eval/kg_clean/metrics.json
+
+Obfuscated:
+
+    eval/kg_obfuscated/analysis/obfuscated_overall.csv
+    scope = changed_only
+
+출력:
+
+    results/step1/kg_summary.csv
+
+목적:
+
+번역 데이터의 문체적 특징에 classifier가
+과도하게 의존하는지 보조적으로 확인한다.
+
+Synthetic KG result test에서
+
+    ALL KG ASSERTIONS PASSED
+
+를 확인하였다.
+
+KG 결과는 보조 평가이며
+KSC 지면이 부족한 경우 졸업논문 중심으로 사용할 수 있다.
+
+---
+
+## 34.12 Runbook 및 실험 계획 최신화
+
+다음 문서를 현재 pipeline에 맞게 갱신하였다.
+
+- `README.md`
+- `docs/step1_experiment_plan.md`
+- `docs/step1_runbook.md`
+
+주요 반영 내용:
+
+- 저장소 역할 재정의
+- JSONL 데이터 계약
+- T9b 최종 선정 조건
+- `id ↔ seed_id` 관계
+- KG 평가
+- `changed=true` 주 평가 기준
+- 현재 학습 / 평가 script interface
+- Main / KG summary 생성 절차
+- 향후 팀 통합 저장소 계획
+
+---
+
+## 34.13 현재 Step 1 코드 상태
+
+현재 구현 완료:
+
+- KoELECTRA training
+- mDeBERTa training
+- CSV / JSONL loader
+- validation F1 best model selection
+- Original-only training script
+- Augmented training script
+- variant-only / combined augmentation normalization
+- 최종 데이터 validator
+- clean evaluation
+- obfuscated evaluation
+- KG clean evaluation
+- KG obfuscated evaluation
+- metadata-preserving predictions
+- changed-only analysis
+- technique analysis
+- technique × intensity analysis
+- Main Step 1 table generator
+- KG supplementary summary generator
+- Selective Router prototype
+- threshold sweep prototype
+
+Synthetic test 완료:
+
+- validator 정상 case
+- changed=false rejection
+- source-group leakage rejection
+- variant-only augmentation
+- combined augmentation
+- obfuscated metrics
+- main table
+- KG summary
+
+---
+
+## 34.14 현재 남은 작업
+
+아직 실제 연구 성능은 측정하지 않았다.
+
+남은 작업:
+
+1. 최종 Step 1 데이터 수신
+2. 실제 파일 schema 검증
+3. 실제 데이터 규모 / label 분포 기록
+4. T9b 두 증강 조건 포함 여부 확인
+5. epochs 확정
+6. batch size 확정
+7. KoELECTRA Original 학습
+8. mDeBERTa Original 학습
+9. KoELECTRA Augmented 학습
+10. mDeBERTa Augmented 학습
+11. Clean / Obfuscated 평가
+12. KG 보조 평가
+13. `table2_summary.csv` 생성
+14. `kg_summary.csv` 생성
+15. 실제 결과 검산
+16. B-screening에 최종 실험 결정 및 결과 기록
+17. 논문 실험 설정 및 결과 작성
+
+현재 단계에서는
+augmentation의 성능 개선 여부에 대한 결론을 내리지 않는다.
+
+---
+
+## 34.15 다음 통합 단계
+
+Step 1 본실험이 안정화되면
+본 저장소 전체를 새 팀 저장소로 복사하지 않는다.
+
+통합에 필요한 검증된 구성요소만 선정한다.
+
+예상 B 파트 이관 대상:
+
+- trained lightweight classifier
+- classifier inference
+- attack-class softmax score 출력
+- 필요한 Router logic
+- 필요한 threshold configuration
+
+이후 별도 팀 저장소에서
+A/B/C 구성요소를 연결하여 최종 pipeline을 구성한다.
+
+현재 Step 1 개발 단계에서는
+팀 통합 저장소를 아직 active source로 사용하지 않는다.
