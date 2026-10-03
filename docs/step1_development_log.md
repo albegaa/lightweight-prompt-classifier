@@ -1,5 +1,15 @@
 # Step 1 Lightweight Prompt Classifier 개발 문서
 
+> **현재 저장소 상태 — 2026-10-03**
+>
+> 현재 Step 1 본실험과 최종 시스템 통합 개발은 `korean-prompt-defense`에서 진행한다.
+> 이 저장소는 초기 경량 분류기와 Selective Router 개발 기록을 보존하며,
+> 향후 실제 경량화된 분류기 구조를 별도로 설계·구현할 때 다시 사용한다.
+>
+> 따라서 현재 Step 1 코드·실험 절차의 source of truth는 `korean-prompt-defense`이다.
+>
+> ---
+
 > **문서 읽는 법**
 >
 > 이 문서는 Step 1 개발 과정을 시간순으로 보존하는 개발 기록이다.
